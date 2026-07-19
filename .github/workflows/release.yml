@@ -1,0 +1,49 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "[0-9]*.[0-9]*.[0-9]*"
+      - "v[0-9]*.[0-9]*.[0-9]*"
+
+env:
+  PACKAGE_IMPORT: weeek_mcp
+
+jobs:
+  publish:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Verify tag matches package version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="${TAG#v}"
+          VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "Tag $TAG does not match pyproject.toml version $VERSION"
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Smoke test (wheel)
+        run: uv run --isolated --no-project --with dist/*.whl python -c "import ${{ env.PACKAGE_IMPORT }}"
+
+      - name: Smoke test (sdist)
+        run: uv run --isolated --no-project --with dist/*.tar.gz python -c "import ${{ env.PACKAGE_IMPORT }}"
+
+      - name: Publish to PyPI
+        run: uv publish
