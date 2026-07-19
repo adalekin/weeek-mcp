@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --group dev --python ${{ matrix.python-version }} --frozen
+
+      - name: Ruff (lint)
+        run: uv run --python ${{ matrix.python-version }} ruff check .
+
+      - name: Ruff (format)
+        run: uv run --python ${{ matrix.python-version }} ruff format --check .
+
+      - name: Mypy
+        run: uv run --python ${{ matrix.python-version }} mypy weeek_mcp
+
+      - name: Pytest
+        # Knowledge base (Playwright) tests need a live login and are not run in CI.
+        run: uv run --python ${{ matrix.python-version }} pytest
+
+      - name: Build
+        run: uv build

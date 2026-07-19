@@ -1,0 +1,78 @@
+[project]
+name = "weeek-mcp"
+version = "0.1.0"
+description = "MCP server for Weeek: task management via the public API and knowledge base via Playwright."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Aleksey Dalekin", email = "adalekin@gmail.com" }]
+requires-python = ">=3.10"
+keywords = ["mcp", "weeek", "task-manager", "knowledge-base", "playwright"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+dependencies = [
+    "mcp>=1.2.0",
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+kb = ["playwright>=1.44.0"]
+
+[project.scripts]
+weeek-mcp = "weeek_mcp.server:main"
+weeek-mcp-login = "weeek_mcp.kb.login:main"
+
+[project.urls]
+Homepage = "https://github.com/adalekin/weeek-mcp"
+Repository = "https://github.com/adalekin/weeek-mcp"
+Issues = "https://github.com/adalekin/weeek-mcp/issues"
+Changelog = "https://github.com/adalekin/weeek-mcp/releases"
+
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+default-groups = ["dev"]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.10.0",
+    "pre-commit>=3.7.1",
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.24.0",
+    "respx>=0.21.0",
+    "ruff>=0.4.4",
+]
+
+[tool.hatch.build.targets.sdist]
+include = ["/weeek_mcp", "/README.md", "/LICENSE"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["weeek_mcp"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = "playwright.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
