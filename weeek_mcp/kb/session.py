@@ -7,9 +7,15 @@ The saved storageState (cookies) is then reused by the httpx client.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 
 from ..config import Config
+from ..logging_util import make_logger
+
+_LOGIN_TIMEOUT = 45.0  # hard ceiling so a stuck browser fails loudly instead of hanging
+_EDIT_TIMEOUT = 45.0
 
 LOGIN_PATH = "/login"  # redirects to /welcome
 EMAIL_INPUT = "input[type='email'], input[name='email']"
@@ -45,8 +51,19 @@ async def automated_login(cfg: Config) -> None:
 
     Raises KBAuthError if credentials are missing or login does not complete
     (typically 2FA, captcha, or Google/SSO) — the caller should fall back to the
-    interactive ``weeek-mcp-login`` seeder.
+    interactive ``weeek-mcp-login`` seeder. Bounded by ``_LOGIN_TIMEOUT`` so a stuck
+    browser (e.g. launch hanging) fails with a clear error instead of hanging past
+    the MCP client's own tool-call timeout with no trace of why.
     """
+    t0 = time.monotonic()
+    try:
+        await asyncio.wait_for(_automated_login(cfg), timeout=_LOGIN_TIMEOUT)
+    except TimeoutError as exc:
+        raise KBAuthError(f"Login timed out after {_LOGIN_TIMEOUT:.0f}s (stuck at {time.monotonic() - t0:.1f}s in).") from exc
+
+
+async def _automated_login(cfg: Config) -> None:
+    log = make_logger(cfg.log_path, "weeek-mcp/kb")
     if not cfg.has_kb_credentials:
         raise KBAuthError(
             "Not logged in and WEEEK_EMAIL/WEEEK_PASSWORD are not set. "
@@ -59,7 +76,9 @@ async def automated_login(cfg: Config) -> None:
         context = await browser.new_context()
         page = await context.new_page()
         try:
-            await page.goto(cfg.app_base + LOGIN_PATH, wait_until="domcontentloaded")
+            t0 = time.monotonic()
+            await page.goto(cfg.app_base + LOGIN_PATH, wait_until="domcontentloaded", timeout=15000)
+            log(f"login: reached {LOGIN_PATH} in {time.monotonic() - t0:.1f}s")
             await page.wait_for_timeout(2000)
 
             # Step 1: email -> Continue
@@ -88,7 +107,7 @@ async def automated_login(cfg: Config) -> None:
             try:
                 await page.wait_for_url(lambda u: all(m not in u for m in UNAUTH_MARKERS), timeout=25000)
             except Exception:
-                pass
+                log(f"login: still on {page.url} after wait_for_url ({time.monotonic() - t0:.1f}s in)")
             await page.wait_for_timeout(2500)
 
             if any(m in page.url for m in UNAUTH_MARKERS):
@@ -99,6 +118,7 @@ async def automated_login(cfg: Config) -> None:
 
             cfg.storage_state_path.parent.mkdir(parents=True, exist_ok=True)
             await context.storage_state(path=str(cfg.storage_state_path))
+            log(f"login: succeeded in {time.monotonic() - t0:.1f}s")
         finally:
             await browser.close()
 
@@ -119,6 +139,19 @@ _PASTE_JS = """(html) => {
 async def replace_article_content(cfg: Config, workspace_id: str, article_id: str, html: str) -> None:
     """Replace a KB article's body in place by driving Weeek's own editor.
 
+    Bounded by ``_EDIT_TIMEOUT`` so a stuck browser/editor fails with a clear error
+    instead of hanging past the MCP client's own tool-call timeout untraced.
+    """
+    t0 = time.monotonic()
+    try:
+        await asyncio.wait_for(_replace_article_content(cfg, workspace_id, article_id, html), timeout=_EDIT_TIMEOUT)
+    except TimeoutError as exc:
+        raise KBAuthError(f"Content edit timed out after {_EDIT_TIMEOUT:.0f}s (stuck at {time.monotonic() - t0:.1f}s in).") from exc
+
+
+async def _replace_article_content(cfg: Config, workspace_id: str, article_id: str, html: str) -> None:
+    """Replace a KB article's body in place by driving Weeek's own editor.
+
     Weeek persists document bodies through a collaborative websocket, not REST, so
     we open the document headlessly, clear it, and paste new HTML (which ProseMirror
     parses into its schema and syncs to the server). The document id is preserved.
@@ -128,16 +161,19 @@ async def replace_article_content(cfg: Config, workspace_id: str, article_id: st
     if not cfg.storage_state_path.exists():
         raise KBAuthError("No saved session. Run `weeek-mcp-login` first.")
 
+    log = make_logger(cfg.log_path, "weeek-mcp/kb")
+    t0 = time.monotonic()
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=cfg.headless)
         context = await browser.new_context(storage_state=str(cfg.storage_state_path))
         page = await context.new_page()
         try:
-            await page.goto(f"{cfg.app_base}/ws/{workspace_id}/kb/{article_id}", wait_until="domcontentloaded")
+            await page.goto(f"{cfg.app_base}/ws/{workspace_id}/kb/{article_id}", wait_until="domcontentloaded", timeout=15000)
             if "/login" in page.url or "/welcome" in page.url:
                 raise KBAuthError("Session expired. Run `weeek-mcp-login` to refresh.")
             # Wait for the editor and its collaborative websocket to connect.
             editor = await page.wait_for_selector(_EDITOR_SELECTOR, timeout=20000)
+            log(f"kb edit: editor ready in {time.monotonic() - t0:.1f}s")
             await page.wait_for_timeout(5000)
             if editor is None:
                 raise KBAuthError("Could not locate the document editor.")
@@ -154,5 +190,6 @@ async def replace_article_content(cfg: Config, workspace_id: str, article_id: st
                 raise KBAuthError("Could not locate the document editor.")
             # Give the collaborative sync time to persist server-side.
             await page.wait_for_timeout(5000)
+            log(f"kb edit: done in {time.monotonic() - t0:.1f}s")
         finally:
             await browser.close()

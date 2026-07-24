@@ -45,6 +45,7 @@ just the knowledge base, or both.
 | `WEEEK_STORAGE_STATE` | Where the browser session is cached (defaults under `~/.local/state`). |
 | `WEEEK_HEADLESS` | `false` to watch the browser during login. |
 | `WEEEK_KB_CACHE_TTL` | Seconds to cache the KB document list (default `300`). |
+| `WEEEK_DEBUG_LOG` | `1`/`true` to write diagnostic timing/step logs to `~/.local/state/weeek-mcp/debug.log` (some MCP hosts discard stderr). Off by default. |
 
 ### Knowledge base first login
 

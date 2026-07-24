@@ -56,10 +56,11 @@ TASK_TOOLS: list[types.Tool] = [
     ),
     types.Tool(
         name="weeek_list_board_columns",
-        description="List board columns (statuses). Optionally filter by board_id.",
+        description="List board columns (statuses) for a board. board_id is required by the Weeek API.",
         inputSchema={
             "type": "object",
             "properties": {"board_id": {"type": "integer"}},
+            "required": ["board_id"],
         },
     ),
     types.Tool(
@@ -245,13 +246,22 @@ KB_TOOLS: list[types.Tool] = [
         name="weeek_kb_create",
         description=(
             "Create a knowledge base document. Optional Markdown content is stored on "
-            "creation. parent_id nests it under another document (folder)."
+            "creation, supporting: headings, nested bullet/numbered/checkbox lists, "
+            "blockquotes, fenced code, horizontal rules, pipe tables, images "
+            "(![alt](url)), and inline **bold**, *italic*, ~~strike~~, `code`, "
+            "[links](url). parent_id nests it under another document (folder)."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "title": {"type": "string"},
-                "content_markdown": {"type": "string"},
+                "content_markdown": {
+                    "type": "string",
+                    "description": (
+                        "Markdown body: headings, nested lists, blockquotes, code fences, "
+                        "hr, pipe tables, images, and inline bold/italic/strike/code/links."
+                    ),
+                },
                 "parent_id": {"type": "string", "description": "Parent document id, for nesting."},
             },
             "required": ["title"],
@@ -261,18 +271,58 @@ KB_TOOLS: list[types.Tool] = [
         name="weeek_kb_update",
         description=(
             "Update a knowledge base document. Rename via title, and/or replace the body "
-            "via content_markdown. Note: content replacement drives Weeek's editor in a "
-            "headless browser (a few seconds) because bodies sync over a collaborative "
-            "channel, not REST."
+            "via content_markdown — same Markdown feature set as weeek_kb_create "
+            "(headings, nested lists, tables, images, bold/italic/strike/code/links). "
+            "Note: content replacement drives Weeek's editor in a headless browser (a "
+            "few seconds) because bodies sync over a collaborative channel, not REST."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "doc_id": {"type": "string"},
                 "title": {"type": "string"},
-                "content_markdown": {"type": "string"},
+                "content_markdown": {
+                    "type": "string",
+                    "description": (
+                        "Replaces the full body. Same Markdown feature set as weeek_kb_create: "
+                        "headings, nested lists, blockquotes, code fences, hr, pipe tables, "
+                        "images, and inline bold/italic/strike/code/links."
+                    ),
+                },
             },
             "required": ["doc_id"],
+        },
+    ),
+    types.Tool(
+        name="weeek_kb_move",
+        description="Nest an existing knowledge base document under another one (or move it elsewhere in the tree).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "doc_id": {"type": "string"},
+                "parent_id": {"type": "string", "description": "New parent document id."},
+            },
+            "required": ["doc_id", "parent_id"],
+        },
+    ),
+    types.Tool(
+        name="weeek_kb_export",
+        description=(
+            "Export knowledge base documents to a local folder as Markdown files, "
+            "mirroring the KB tree. Use this to feed folder-based integrations such as a "
+            "Claude Desktop project's Context, which accepts folders rather than MCP "
+            "resources. Re-run to refresh."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "target_dir": {"type": "string", "description": "Destination folder path."},
+                "query": {
+                    "type": "string",
+                    "description": "Optional search filter; omit to export everything.",
+                },
+            },
+            "required": ["target_dir"],
         },
     ),
     types.Tool(
@@ -395,6 +445,13 @@ async def handle_kb_tool(name: str, args: dict[str, Any], kb: WeeekKB) -> Any:
         if not actions:
             raise ValueError("weeek_kb_update needs title and/or content_markdown.")
         return {"id": args["doc_id"], "updated": actions}
+    if name == "weeek_kb_move":
+        await kb.move_document(args["doc_id"], args["parent_id"])
+        return {"id": args["doc_id"], "parent_id": args["parent_id"], "moved": True}
+    if name == "weeek_kb_export":
+        result = await kb.export_documents(args["target_dir"], query=args.get("query", ""))
+        # Keep the response compact: counts and directory, not every path.
+        return {"exported": result["exported"], "directory": result["directory"]}
     if name == "weeek_kb_delete":
         await kb.delete_document(args["doc_id"], permanent=bool(args.get("permanent")))
         return {"id": args["doc_id"], "deleted": True, "permanent": bool(args.get("permanent"))}

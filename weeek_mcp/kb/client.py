@@ -9,6 +9,10 @@ Endpoints (base ``{internal_api_base}/ws/{workspace_id}``):
   GET /kb/articles/search?search=&offset=0&limit=&isTrashed=0  -> flat article list
   GET /kb/articles/{id}                                        -> article + content
 
+Note: ``parentId`` in the create/update article body is silently ignored by the
+API (confirmed by network capture of the web app) — nesting is a separate write,
+``PATCH /kb/hierarchy`` with ``{targetId, placeId, direction: "into"}``.
+
 Public surface (stable for callers):
     await kb.list_documents()      -> list[KBDocument]
     await kb.read_document(doc_id) -> str  (markdown)
@@ -18,12 +22,15 @@ Public surface (stable for callers):
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 
 from ..config import Config
+from ..logging_util import make_logger
 from .prosemirror import markdown_to_doc, markdown_to_html, to_markdown
 from .session import KBAuthError, automated_login, load_cookies_into, replace_article_content
 
@@ -41,6 +48,15 @@ class KBDocument:
     path: str  # breadcrumb trail, e.g. "Технологии / Провайдеры"
 
 
+_UNSAFE = re.compile(r'[/\\:*?"<>|]+')
+
+
+def _safe_name(name: str) -> str:
+    """Filesystem-safe file/folder name derived from a document title."""
+    cleaned = _UNSAFE.sub("-", name).strip().strip(".")
+    return (cleaned or "untitled")[:120]
+
+
 def _breadcrumb(article: dict) -> str:
     crumbs = article.get("breadcrumbs") or []
     names = [c.get("name", "") for c in crumbs if isinstance(c, dict)]
@@ -55,6 +71,7 @@ class WeeekKB:
         self._ws: str | None = config.workspace_id
         self._cache: list[KBDocument] | None = None
         self._cache_ts: float = 0.0
+        self._log = make_logger(config.log_path, "weeek-mcp/kb")
 
     # ------------------------------------------------------------- http/session
     def _ensure_client(self) -> httpx.AsyncClient:
@@ -72,10 +89,14 @@ class WeeekKB:
         return self._client
 
     async def _refresh_session(self) -> None:
+        t0 = time.monotonic()
+        self._log("session refresh: starting automated login")
         try:
             await automated_login(self._cfg)
         except KBAuthError as exc:
+            self._log(f"session refresh: failed after {time.monotonic() - t0:.1f}s: {exc}")
             raise KBError(str(exc)) from exc
+        self._log(f"session refresh: done in {time.monotonic() - t0:.1f}s")
         # Rebuild the client so fresh cookies are loaded.
         if self._client is not None:
             await self._client.aclose()
@@ -84,12 +105,15 @@ class WeeekKB:
 
     async def _get(self, path: str, *, params: dict | None = None, _retry: bool = True):
         client = self._ensure_client()
+        t0 = time.monotonic()
         try:
             resp = await client.get(path, params=params)
         except httpx.HTTPError as exc:
+            self._log(f"GET {path} failed after {time.monotonic() - t0:.1f}s: {exc}")
             raise KBError(f"Request to {path} failed: {exc}") from exc
 
         if resp.status_code in (401, 403) and _retry:
+            self._log(f"GET {path} got {resp.status_code}, refreshing session and retrying")
             await self._refresh_session()
             return await self._get(path, params=params, _retry=False)
         if resp.status_code >= 400:
@@ -177,9 +201,22 @@ class WeeekKB:
             raise KBError(f"Internal API {resp.status_code} for {path}: {resp.text[:200]}")
         return resp.json()
 
-    async def _delete(self, path: str):
+    async def _patch(self, path: str, payload: dict, *, _retry: bool = True):
+        client = self._ensure_client()
+        resp = await client.patch(path, json=payload)
+        if resp.status_code in (401, 403) and _retry:
+            await self._refresh_session()
+            return await self._patch(path, payload, _retry=False)
+        if resp.status_code >= 400:
+            raise KBError(f"Internal API {resp.status_code} for {path}: {resp.text[:200]}")
+        return resp.json()
+
+    async def _delete(self, path: str, *, _retry: bool = True):
         client = self._ensure_client()
         resp = await client.delete(path)
+        if resp.status_code in (401, 403) and _retry:
+            await self._refresh_session()
+            return await self._delete(path, _retry=False)
         if resp.status_code >= 400:
             raise KBError(f"Internal API {resp.status_code} for {path}: {resp.text[:200]}")
         return resp.json()
@@ -187,21 +224,44 @@ class WeeekKB:
     def _invalidate_cache(self) -> None:
         self._cache = None
 
+    async def _set_parent(self, doc_id: str, parent_id: str | int) -> None:
+        """Nest a document under another one.
+
+        ``parentId`` in the article create/update body is silently ignored by the
+        API — this is the only endpoint that actually reparents a document.
+        """
+        ws = await self._workspace()
+        await self._patch(
+            f"/ws/{ws}/kb/hierarchy",
+            {"targetId": int(doc_id), "placeId": int(parent_id), "direction": "into"},
+        )
+
     async def create_document(
         self, title: str, *, markdown: str | None = None, parent_id: str | int | None = None
     ) -> KBDocument:
         ws = await self._workspace()
         body: dict = {"name": title, "content": markdown_to_doc(markdown) if markdown else {}}
-        if parent_id is not None:
-            body["parentId"] = int(parent_id)
         data = await self._post(f"/ws/{ws}/kb/articles", body)
         art = data.get("article") or {}
+        doc_id = str(art.get("id"))
+
+        if parent_id is not None:
+            await self._set_parent(doc_id, parent_id)
+            # Re-fetch: the create response has no breadcrumbs, and now they've changed.
+            fresh = await self._get(f"/ws/{ws}/kb/articles/{doc_id}")
+            art = fresh.get("article") or art
+
         self._invalidate_cache()
-        return KBDocument(id=str(art.get("id")), title=art.get("name") or title, path=_breadcrumb(art))
+        return KBDocument(id=doc_id, title=art.get("name") or title, path=_breadcrumb(art))
 
     async def rename_document(self, doc_id: str, title: str) -> None:
         ws = await self._workspace()
         await self._put(f"/ws/{ws}/kb/articles/{doc_id}", {"name": title})
+        self._invalidate_cache()
+
+    async def move_document(self, doc_id: str, parent_id: str | int) -> None:
+        """Nest an existing document under another one (or move it elsewhere)."""
+        await self._set_parent(doc_id, parent_id)
         self._invalidate_cache()
 
     async def update_content(self, doc_id: str, markdown: str) -> None:
@@ -211,6 +271,37 @@ class WeeekKB:
         if not self._cfg.storage_state_path.exists():
             await self._refresh_session()
         await replace_article_content(self._cfg, ws, str(doc_id), markdown_to_html(markdown))
+
+    async def export_documents(self, target_dir: str, *, query: str = "") -> dict:
+        """Write knowledge base documents to a local folder as Markdown files.
+
+        Mirrors the KB tree as subfolders and adds YAML front matter with the
+        document id and path. Intended for folder-based integrations (e.g. adding
+        the folder to a Claude Desktop project's Context), which take file content
+        rather than links.
+        """
+        docs = await self.search(query) if query.strip() else await self.list_documents(force=True)
+        root = Path(target_dir).expanduser()
+        root.mkdir(parents=True, exist_ok=True)
+
+        written: list[str] = []
+        for d in docs:
+            body = await self.read_document(d.id)
+            parts = [p.strip() for p in d.path.split("/") if p.strip()]
+            if parts and parts[-1] == d.title:
+                parts = parts[:-1]  # last crumb is the document itself
+            folder = root.joinpath(*[_safe_name(p) for p in parts]) if parts else root
+            folder.mkdir(parents=True, exist_ok=True)
+
+            path = folder / f"{_safe_name(d.title)}.md"
+            if path.exists() and f"weeek_id: {d.id}\n" not in path.read_text():
+                path = folder / f"{_safe_name(d.title)}-{d.id}.md"  # title collision
+
+            front = f"---\ntitle: {d.title}\nweeek_id: {d.id}\nweeek_path: {d.path}\n---\n\n"
+            path.write_text(front + body)
+            written.append(str(path))
+
+        return {"exported": len(written), "directory": str(root), "files": written}
 
     async def delete_document(self, doc_id: str, *, permanent: bool = False) -> None:
         ws = await self._workspace()

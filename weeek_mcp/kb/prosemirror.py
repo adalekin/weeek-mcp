@@ -1,8 +1,13 @@
-"""Convert Weeek knowledge base documents (ProseMirror/TipTap JSON) to Markdown.
+"""Convert between Weeek knowledge base documents (ProseMirror/TipTap JSON) and Markdown.
 
-Node types observed in Weeek KB: doc, heading, paragraph, list, text, code, quote,
-horizontal-line, image, line-break, table/table_body/table_row/table_cell/table_html.
-Mark types: bold (italic/link/code/strike handled defensively if they appear).
+Node types observed in Weeek KB: doc, heading, paragraph, list (nested), text, code,
+quote, horizontal-line, image, line-break, table/table_body/table_row/table_cell/table_html.
+Mark types: bold, italic, strike, code, link.
+
+Both directions (read: doc -> markdown, write: markdown -> doc / -> HTML) support
+the same feature set: headings, nested bullet/numbered/checkbox lists, blockquotes,
+fenced code, horizontal rules, pipe tables, images, and inline bold/italic/strike/
+code/links.
 """
 
 from __future__ import annotations
@@ -182,29 +187,66 @@ def _inline_cell(cell: dict) -> str:
 
 # ======================================================================= Markdown -> ProseMirror
 # Supports the block/inline subset Weeek's editor uses: headings, paragraphs,
-# bullet/numbered/checkbox lists (flat), fenced code, blockquotes, horizontal
-# rules, plus **bold** and `code` inline. Rich features (tables, nested lists,
-# images) are intentionally out of scope for authoring.
+# nested bullet/numbered/checkbox lists, fenced code, blockquotes, horizontal
+# rules, pipe tables, images, and inline **bold**, *italic*/_italic_, ~~strike~~,
+# `code`, [links](url).
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
-_BULLET_RE = re.compile(r"^\s*[-*]\s+(.*)$")
-_CHECK_RE = re.compile(r"^\s*[-*]\s+\[( |x|X)\]\s+(.*)$")
-_NUMBER_RE = re.compile(r"^\s*\d+[.)]\s+(.*)$")
-_INLINE_RE = re.compile(r"(\*\*.+?\*\*|`.+?`)")
+_BULLET_RE = re.compile(r"^( *)[-*]\s+(.*)$")
+_CHECK_RE = re.compile(r"^( *)[-*]\s+\[( |x|X)\]\s+(.*)$")
+_NUMBER_RE = re.compile(r"^( *)\d+[.)]\s+(.*)$")
+_TABLE_ROW_RE = re.compile(r"^\s*\|(.+)\|\s*$")
+_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
+
+_INLINE_TOKEN_RE = re.compile(
+    r"(\*\*.+?\*\*"  # bold
+    r"|~~.+?~~"  # strike
+    r"|`[^`]+?`"  # code
+    r"|!\[[^\]]*\]\([^)]+?\)"  # image
+    r"|\[[^\]]+?\]\([^)]+?\)"  # link
+    r"|\*[^*\s][^*]*?\*"  # italic (*...*)
+    r"|_[^_\s][^_]*?_)"  # italic (_..._)
+)
+_LINK_RE = re.compile(r"^\[([^\]]+)\]\(([^)]+)\)$")
+_IMAGE_RE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
 
 
 def _inline_nodes(text: str) -> list[dict]:
     nodes: list[dict] = []
-    for part in _INLINE_RE.split(text):
+    for part in _INLINE_TOKEN_RE.split(text):
         if not part:
             continue
         if part.startswith("**") and part.endswith("**") and len(part) > 4:
             nodes.append({"type": "text", "text": part[2:-2], "marks": [{"type": "bold"}]})
+        elif part.startswith("~~") and part.endswith("~~") and len(part) > 4:
+            nodes.append({"type": "text", "text": part[2:-2], "marks": [{"type": "strike"}]})
         elif part.startswith("`") and part.endswith("`") and len(part) > 2:
             nodes.append({"type": "text", "text": part[1:-1], "marks": [{"type": "code"}]})
+        elif part.startswith("!["):
+            m = _IMAGE_RE.match(part)
+            if m:
+                nodes.append({"type": "image", "attrs": {"link": m.group(2)}})
+            else:
+                nodes.append({"type": "text", "text": part})
+        elif part.startswith("["):
+            m = _LINK_RE.match(part)
+            if m:
+                nodes.append({"type": "text", "text": m.group(1), "marks": [{"type": "link", "attrs": {"href": m.group(2)}}]})
+            else:
+                nodes.append({"type": "text", "text": part})
+        elif (part.startswith("*") and part.endswith("*") and len(part) > 2) or (
+            part.startswith("_") and part.endswith("_") and len(part) > 2
+        ):
+            nodes.append({"type": "text", "text": part[1:-1], "marks": [{"type": "italic"}]})
         else:
             nodes.append({"type": "text", "text": part})
     return nodes
+
+
+def _split_table_row(line: str) -> list[str]:
+    m = _TABLE_ROW_RE.match(line)
+    inner = m.group(1) if m else line
+    return [cell.strip() for cell in inner.split("|")]
 
 
 def _para(text: str) -> dict:
@@ -217,11 +259,20 @@ def markdown_to_doc(md: str) -> dict:
     content: list[dict] = []
     i = 0
     para_buf: list[str] = []
+    list_node_at_depth: dict[int, dict] = {}
 
     def flush_para() -> None:
         if para_buf:
             content.append(_para(" ".join(para_buf).strip()))
             para_buf.clear()
+
+    def add_list_item(depth: int, node: dict) -> None:
+        parent = list_node_at_depth.get(depth - 1) if depth > 0 else None
+        container = parent["content"] if parent is not None else content
+        container.append(node)
+        list_node_at_depth[depth] = node
+        for k in [k for k in list_node_at_depth if k > depth]:
+            del list_node_at_depth[k]
 
     while i < len(lines):
         line = lines[i]
@@ -272,27 +323,61 @@ def markdown_to_doc(md: str) -> dict:
         mc = _CHECK_RE.match(line)
         if mc:
             flush_para()
-            content.append(
-                {
-                    "type": "list",
-                    "attrs": {"kind": "check", "checked": mc.group(1).lower() == "x"},
-                    "content": [_para(mc.group(2))],
-                }
-            )
+            depth = len(mc.group(1)) // 2
+            node = {
+                "type": "list",
+                "attrs": {"kind": "check", "checked": mc.group(2).lower() == "x"},
+                "content": [_para(mc.group(3))],
+            }
+            add_list_item(depth, node)
             i += 1
             continue
 
         mb = _BULLET_RE.match(line)
         if mb:
             flush_para()
-            content.append({"type": "list", "attrs": {"kind": "bullet"}, "content": [_para(mb.group(1))]})
+            depth = len(mb.group(1)) // 2
+            node = {"type": "list", "attrs": {"kind": "bullet"}, "content": [_para(mb.group(2))]}
+            add_list_item(depth, node)
             i += 1
             continue
 
         mn = _NUMBER_RE.match(line)
         if mn:
             flush_para()
-            content.append({"type": "list", "attrs": {"kind": "number"}, "content": [_para(mn.group(1))]})
+            depth = len(mn.group(1)) // 2
+            node = {"type": "list", "attrs": {"kind": "number"}, "content": [_para(mn.group(2))]}
+            add_list_item(depth, node)
+            i += 1
+            continue
+
+        if (
+            _TABLE_ROW_RE.match(stripped)
+            and i + 1 < len(lines)
+            and _TABLE_ROW_RE.match(lines[i + 1].strip())
+            and _TABLE_SEP_RE.match(lines[i + 1].strip())
+        ):
+            flush_para()
+            header = _split_table_row(stripped)
+            i += 2  # skip header + separator
+            rows = [header]
+            while i < len(lines) and _TABLE_ROW_RE.match(lines[i].strip()):
+                rows.append(_split_table_row(lines[i].strip()))
+                i += 1
+            table_rows = [
+                {
+                    "type": "table_row",
+                    "content": [{"type": "table_cell", "content": [_para(cell)]} for cell in row],
+                }
+                for row in rows
+            ]
+            content.append({"type": "table", "content": [{"type": "table_body", "content": table_rows}]})
+            continue
+
+        mi = _IMAGE_RE.match(stripped)
+        if mi:
+            flush_para()
+            content.append({"type": "image", "attrs": {"link": mi.group(2)}})
             i += 1
             continue
 
@@ -366,7 +451,7 @@ def _html_blocks(nodes: Any) -> str:
                 is_ord = a.get("kind") in ("number", "ordered")
                 if is_ord != ordered:
                     break
-                items.append(f"<li>{_html_inline(_first_para(nodes[i]))}</li>")
+                items.append(f"<li>{_html_list_item(nodes[i])}</li>")
                 i += 1
             parts.append(f"<{tag}>{''.join(items)}</{tag}>")
             continue
@@ -375,11 +460,19 @@ def _html_blocks(nodes: Any) -> str:
     return "".join(parts)
 
 
-def _first_para(list_node: dict) -> list[dict]:
+def _html_list_item(list_node: dict) -> str:
+    # A list item's own text, plus any nested "list" children rendered as a sub-list.
+    text = ""
+    nested: list[dict] = []
     for c in list_node.get("content") or []:
         if c.get("type") == "paragraph":
-            return c.get("content") or []
-    return []
+            text = _html_inline(c.get("content"))
+        elif c.get("type") == "list":
+            nested.append(c)
+        else:
+            nested_html = _html_block(c)
+            text = text + nested_html if text else nested_html
+    return text + (_html_blocks(nested) if nested else "")
 
 
 def _html_block(node: dict) -> str:
@@ -399,4 +492,28 @@ def _html_block(node: dict) -> str:
         return "<hr>"
     if t == "image":
         return f'<img src="{_esc(attrs.get("link", ""))}">'
+    if t in ("table", "table_body", "table_row", "table_cell"):
+        return _html_table(node)
+    if t == "table_html":
+        return _html_blocks(content)
     return f"<p>{_html_inline(content)}</p>"
+
+
+def _html_table(node: dict) -> str:
+    rows: list[dict] = []
+
+    def find_rows(n: dict) -> None:
+        for c in n.get("content") or []:
+            if c.get("type") == "table_row":
+                rows.append(c)
+            else:
+                find_rows(c)
+
+    find_rows(node)
+    if not rows:
+        return ""
+    row_html = []
+    for row in rows:
+        cells = [c for c in (row.get("content") or []) if c.get("type") == "table_cell"]
+        row_html.append("<tr>" + "".join(f"<td>{_html_blocks(c.get('content') or [])}</td>" for c in cells) + "</tr>")
+    return "<table><tbody>" + "".join(row_html) + "</tbody></table>"

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
+import time
 from typing import Any
 
 import mcp.types as types
@@ -24,6 +24,7 @@ from pydantic import AnyUrl
 from . import __version__
 from .config import Config
 from .kb.client import KBError, WeeekKB
+from .logging_util import make_logger
 from .tools import (
     ALL_TOOLS,
     KB_TOOL_NAMES,
@@ -38,10 +39,6 @@ from .tools import (
 from .weeek_api import WeeekAPI, WeeekAPIError
 
 
-def _log(msg: str) -> None:
-    print(f"[weeek-mcp] {msg}", file=sys.stderr, flush=True)
-
-
 class WeeekServer:
     def __init__(self, config: Config):
         self.cfg = config
@@ -49,6 +46,7 @@ class WeeekServer:
         self._api: WeeekAPI | None = None
         self._kb: WeeekKB | None = None
         self.kb_available = config.has_kb_credentials or config.storage_state_path.exists()
+        self._log = make_logger(config.log_path, "weeek-mcp")
         self._register()
 
     # ------------------------------------------------------------- lazy deps
@@ -78,6 +76,8 @@ class WeeekServer:
         @self.server.call_tool()
         async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[types.ContentBlock]:
             args = arguments or {}
+            t0 = time.monotonic()
+            self._log(f"{name}: start")
             try:
                 if name in TASK_TOOL_NAMES:
                     result = await handle_task_tool(name, args, self._get_api())
@@ -86,10 +86,16 @@ class WeeekServer:
                 else:
                     raise ValueError(f"Unknown tool: {name}")
             except WeeekAPIError as exc:
+                self._log(f"{name}: failed after {time.monotonic() - t0:.1f}s: Weeek API error {exc.status_code}")
                 raise ValueError(f"Weeek API error {exc.status_code}: {exc.body}") from exc
             except KBError as exc:
+                self._log(f"{name}: failed after {time.monotonic() - t0:.1f}s: {exc}")
                 raise ValueError(f"Knowledge base error: {exc}") from exc
+            except Exception as exc:
+                self._log(f"{name}: failed after {time.monotonic() - t0:.1f}s: {type(exc).__name__}: {exc}")
+                raise
 
+            self._log(f"{name}: done in {time.monotonic() - t0:.1f}s")
             text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, indent=2)
             return [types.TextContent(type="text", text=text)]
 
@@ -100,7 +106,7 @@ class WeeekServer:
             try:
                 docs = await self._get_kb().list_documents()
             except Exception as exc:  # noqa: BLE001 — never let KB break the session
-                _log(f"list_resources failed: {exc}")
+                self._log(f"list_resources failed: {exc}")
                 return []
             return [
                 types.Resource(
@@ -138,8 +144,10 @@ class WeeekServer:
 
 async def _amain() -> None:
     cfg = Config.from_env()
+    log = make_logger(cfg.log_path, "weeek-mcp")
+    log(f"Initializing server (log file: {cfg.log_path})")
     if not cfg.has_api and not (cfg.has_kb_credentials or cfg.storage_state_path.exists()):
-        _log("Warning: neither WEEEK_API_TOKEN nor KB credentials/session found. Tools will error until configured.")
+        log("Warning: neither WEEEK_API_TOKEN nor KB credentials/session found. Tools will error until configured.")
     await WeeekServer(cfg).run()
 
 

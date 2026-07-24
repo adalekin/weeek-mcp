@@ -17,10 +17,27 @@ DEFAULT_APP_BASE = "https://app.weeek.net"
 DEFAULT_INTERNAL_API_BASE = "https://api.weeek.net"
 
 
+def _state_dir() -> Path:
+    base = os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")
+    return Path(base) / "weeek-mcp"
+
+
 def _default_state_path() -> Path:
     """Where the Playwright login session (storageState) is cached."""
-    base = os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")
-    return Path(base) / "weeek-mcp" / "storage_state.json"
+    return _state_dir() / "storage_state.json"
+
+
+def _default_log_path() -> Path | None:
+    """Where diagnostic timing/step logs are written, if enabled.
+
+    Opt-in via WEEEK_DEBUG_LOG=1: MCP hosts commonly discard a locally-run
+    extension's stderr (observed with Claude Desktop: the subprocess's fd 2 is
+    wired to /dev/null), so debug output has to go to a file we control to
+    survive at all — but that shouldn't happen by default for every user.
+    """
+    if os.environ.get("WEEEK_DEBUG_LOG", "").lower() not in ("1", "true"):
+        return None
+    return _state_dir() / "debug.log"
 
 
 @dataclass(frozen=True)
@@ -36,6 +53,7 @@ class Config:
     email: str | None
     password: str | None
     storage_state_path: Path
+    log_path: Path | None
     headless: bool
     kb_cache_ttl: int  # seconds to cache the KB document tree for resources/list
 
@@ -59,6 +77,7 @@ class Config:
             email=os.environ.get("WEEEK_EMAIL"),
             password=os.environ.get("WEEEK_PASSWORD"),
             storage_state_path=Path(state) if state else _default_state_path(),
+            log_path=_default_log_path(),
             headless=os.environ.get("WEEEK_HEADLESS", "true").lower() != "false",
             kb_cache_ttl=int(os.environ.get("WEEEK_KB_CACHE_TTL", "300")),
         )

@@ -144,3 +144,52 @@ def test_markdown_to_html():
 def test_markdown_to_html_ordered_and_code():
     html = markdown_to_html("1. a\n2. b\n\n```\ncode\n```")
     assert html == "<ol><li>a</li><li>b</li></ol><pre><code>code</code></pre>"
+
+
+# ------------------------------------------------------------- extended formatting (write path)
+
+
+def test_markdown_to_doc_inline_marks():
+    doc = markdown_to_doc("a **b** *c* ~~d~~ `e` [f](http://x) g")
+    nodes = doc["content"][0]["content"]
+    marks_by_text = {n["text"]: [m["type"] for m in n.get("marks", [])] for n in nodes}
+    assert marks_by_text["b"] == ["bold"]
+    assert marks_by_text["c"] == ["italic"]
+    assert marks_by_text["d"] == ["strike"]
+    assert marks_by_text["e"] == ["code"]
+    assert marks_by_text["f"] == ["link"]
+    link_node = next(n for n in nodes if n["text"] == "f")
+    assert link_node["marks"][0]["attrs"]["href"] == "http://x"
+
+
+def test_markdown_to_doc_nested_list():
+    doc = markdown_to_doc("- a\n  - a.1\n    - a.1.1\n- b")
+    content = doc["content"]
+    assert [n["type"] for n in content] == ["list", "list"]
+    a_children = content[0]["content"]
+    assert a_children[0]["type"] == "paragraph"
+    assert a_children[1]["type"] == "list"  # a.1 nested under a
+    nested = a_children[1]["content"]
+    assert nested[1]["type"] == "list"  # a.1.1 nested under a.1
+    assert to_markdown(doc) == "- a\n  - a.1\n    - a.1.1\n- b"
+
+
+def test_markdown_to_doc_table():
+    md = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+    doc = markdown_to_doc(md)
+    assert doc["content"][0]["type"] == "table"
+    assert to_markdown(doc) == md
+
+
+def test_markdown_to_doc_image_block():
+    doc = markdown_to_doc("![alt](http://img/1)")
+    assert doc["content"][0] == {"type": "image", "attrs": {"link": "http://img/1"}}
+
+
+def test_markdown_to_html_extended():
+    html = markdown_to_html("*i* ~~s~~ [l](http://x)\n\n- a\n  - a.1\n\n| A | B |\n| --- | --- |\n| 1 | 2 |")
+    assert '<em>i</em>' in html
+    assert '<s>s</s>' in html
+    assert '<a href="http://x">l</a>' in html
+    assert '<ul><li>a<ul><li>a.1</li></ul></li></ul>' in html
+    assert '<table><tbody><tr><td><p>A</p></td><td><p>B</p></td></tr><tr><td><p>1</p></td><td><p>2</p></td></tr></tbody></table>' in html
