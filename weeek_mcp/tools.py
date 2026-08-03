@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import html
 import re
+from pathlib import Path
 from typing import Any
 
 import mcp.types as types
@@ -342,7 +343,11 @@ TASK_TOOLS: list[types.Tool] = [
                 "start_date_time": {"type": "string", "description": "ISO 8601"},
                 "due_date_time": {"type": "string", "description": "ISO 8601"},
                 "duration": {"type": "integer", "description": "Estimate in minutes"},
-                "tags": {"type": "array", "items": {"type": "integer"}},
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Tag ids — weeek_manage_tags lists them with their names.",
+                },
                 "custom_fields": {
                     "type": "object",
                     "description": (
@@ -402,14 +407,18 @@ TASK_TOOLS: list[types.Tool] = [
     ),
     types.Tool(
         name="weeek_move_task",
-        description="Move a task to a board column (status).",
+        description=(
+            "Move a task to a board column (status) and/or to another board. Give at least "
+            "one of board_column_id, board_id."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
                 "task_id": {"type": "integer"},
                 "board_column_id": {"type": "integer"},
+                "board_id": {"type": "integer", "description": "Target board; applied before the column."},
             },
-            "required": ["task_id", "board_column_id"],
+            "required": ["task_id"],
         },
     ),
     types.Tool(
@@ -434,6 +443,296 @@ TASK_TOOLS: list[types.Tool] = [
                 "assignees": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["task_id", "assignees"],
+        },
+    ),
+    types.Tool(
+        name="weeek_set_task_parent",
+        description=(
+            "Nest a task under another one, or detach it with parent_id null. after/before "
+            "place it among its new siblings."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "parent_id": {"type": ["integer", "null"], "description": "New parent; null makes it top-level."},
+                "after": {"type": ["integer", "null"], "description": "Sibling task id to sit after."},
+                "before": {"type": ["integer", "null"], "description": "Sibling task id to sit before."},
+            },
+            "required": ["task_id", "parent_id"],
+        },
+    ),
+    types.Tool(
+        name="weeek_add_task_to_project",
+        description=("Put a task into a project (a task can live in several). Optionally target a board column there."),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "project_id": {"type": "integer"},
+                "board_column_id": {"type": ["integer", "null"]},
+            },
+            "required": ["task_id", "project_id"],
+        },
+    ),
+    types.Tool(
+        name="weeek_remove_task_from_project",
+        description="Remove a task from one of the projects it belongs to.",
+        inputSchema={
+            "type": "object",
+            "properties": {"task_id": {"type": "integer"}, "project_id": {"type": "integer"}},
+            "required": ["task_id", "project_id"],
+        },
+    ),
+    types.Tool(
+        name="weeek_set_watchers",
+        description="Add watchers (subscribers) to a task — member ids from weeek_list_members.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "watchers": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["task_id", "watchers"],
+        },
+    ),
+    types.Tool(
+        name="weeek_remove_watchers",
+        description="Remove watchers from a task.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "watchers": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["task_id", "watchers"],
+        },
+    ),
+    types.Tool(
+        name="weeek_task_timer",
+        description="Start or stop the running timer on a task.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "action": {"type": "string", "enum": ["start", "stop"]},
+            },
+            "required": ["task_id", "action"],
+        },
+    ),
+    types.Tool(
+        name="weeek_manage_time_entry",
+        description=(
+            "Log time on a task, or edit/delete a logged entry. create and update need "
+            "user_id, date, duration; delete needs entry_id."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["create", "update", "delete"]},
+                "task_id": {"type": "integer"},
+                "entry_id": {"type": "integer", "description": "Required for update and delete."},
+                "user_id": {"type": "string", "description": "Whose time this is."},
+                "date": {"type": "string", "description": "Y-m-d"},
+                "duration": {"type": "integer", "description": "Minutes"},
+                "is_overtime": {"type": "boolean", "default": False},
+            },
+            "required": ["action", "task_id"],
+        },
+    ),
+    types.Tool(
+        name="weeek_upload_attachment",
+        description="Attach local files to a task. Paths must exist on this machine.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "paths": {"type": "array", "items": {"type": "string"}, "description": "Absolute file paths."},
+            },
+            "required": ["task_id", "paths"],
+        },
+    ),
+    types.Tool(
+        name="weeek_get_attachment",
+        description="Get one attachment's metadata and download URL by file id.",
+        inputSchema={
+            "type": "object",
+            "properties": {"file_id": {"type": "string"}},
+            "required": ["file_id"],
+        },
+    ),
+    types.Tool(
+        name="weeek_manage_tags",
+        description=(
+            "Workspace tags: list them (with ids to use in weeek_update_task), create, rename/recolor, or delete one."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "create", "update", "delete"]},
+                "tag_id": {"type": "integer", "description": "Required for update and delete."},
+                "title": {"type": "string", "description": "Required for create and update."},
+                "color": {"type": "string", "description": "Hex color; required by the API on update."},
+            },
+            "required": ["action"],
+        },
+    ),
+    types.Tool(
+        name="weeek_manage_projects",
+        description=("Create, update, delete, archive or unarchive a project. Use weeek_list_projects to read them."),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["create", "update", "delete", "archive", "unarchive"]},
+                "project_id": {"type": "integer", "description": "Required for everything but create."},
+                "name": {"type": "string", "description": "Required for create and update."},
+                "is_private": {"type": "boolean", "description": "Required by the API on create and update."},
+                "description": {"type": "string"},
+                "portfolio_id": {"type": "integer", "description": "Create only."},
+                "color": {
+                    "type": "string",
+                    "description": "Hex color, e.g. #35AAFF. Required on update — the API rejects it missing.",
+                },
+            },
+            "required": ["action"],
+        },
+    ),
+    types.Tool(
+        name="weeek_manage_boards",
+        description="Create, rename, delete or reorder a board. Use weeek_list_boards to read them.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["create", "update", "delete", "move"]},
+                "board_id": {"type": "integer", "description": "Required for everything but create."},
+                "project_id": {"type": "integer", "description": "Required for create."},
+                "name": {"type": "string", "description": "Required for create and update."},
+                "upper_board_id": {
+                    "type": ["integer", "null"],
+                    "description": "move: the board to sit below; null moves it to the top.",
+                },
+            },
+            "required": ["action"],
+        },
+    ),
+    types.Tool(
+        name="weeek_manage_board_columns",
+        description=(
+            "Create, rename, delete or reorder a board column (status). Use weeek_list_board_columns to read them."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["create", "update", "delete", "move"]},
+                "board_column_id": {"type": "integer", "description": "Required for everything but create."},
+                "board_id": {"type": "integer", "description": "Required for create."},
+                "name": {"type": "string", "description": "Required for create and update."},
+                "upper_board_column_id": {
+                    "type": ["integer", "null"],
+                    "description": "move: the column to sit after; null moves it first.",
+                },
+            },
+            "required": ["action"],
+        },
+    ),
+    types.Tool(
+        name="weeek_manage_portfolios",
+        description="List, create, rename or delete portfolios (the folders projects live in).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "get", "create", "update", "delete"]},
+                "portfolio_id": {"type": "integer", "description": "Required for get, update and delete."},
+                "name": {"type": "string", "description": "Required for create and update."},
+                "parent_id": {"type": ["integer", "null"], "description": "Nest a portfolio under another one."},
+                "search": {"type": "string", "description": "list only."},
+                "limit": {"type": "integer", "description": "list only."},
+                "offset": {"type": "integer", "description": "list only."},
+            },
+            "required": ["action"],
+        },
+    ),
+    types.Tool(
+        name="weeek_manage_custom_fields",
+        description=(
+            "Create, update, delete, move or transfer custom fields and their select "
+            "options. A field belongs to one board, one project, or the whole task manager "
+            "(scope global) — set scope and scope_id accordingly. weeek_list_custom_fields "
+            "reads the fields a project's tasks actually show."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "list_global",
+                        "create",
+                        "update",
+                        "delete",
+                        "transfer",
+                        "create_option",
+                        "update_option",
+                        "delete_option",
+                        "move_option",
+                    ],
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["global", "project", "board"],
+                    "default": "global",
+                    "description": "Where the field lives.",
+                },
+                "scope_id": {"type": "integer", "description": "Project or board id; omit for global."},
+                "field_id": {"type": "string", "description": "Required for everything but create/list_global."},
+                "option_id": {"type": "string", "description": "Required for the *_option actions except create."},
+                "name": {"type": "string", "description": "Field or option name."},
+                "type": {
+                    "type": "string",
+                    "enum": [
+                        "text",
+                        "boolean",
+                        "datetime",
+                        "select",
+                        "multiselect",
+                        "member",
+                        "contact",
+                        "link",
+                        "approval",
+                        "number",
+                    ],
+                    "description": "Required when creating a field.",
+                },
+                "color": {
+                    "type": "string",
+                    "enum": [
+                        "blue",
+                        "light_blue",
+                        "dark_purple",
+                        "purple",
+                        "dark_pink",
+                        "pink",
+                        "light_pink",
+                        "red",
+                        "turquoise",
+                        "green",
+                        "light_green",
+                        "dark_yellow",
+                        "yellow",
+                    ],
+                    "description": "Required when creating or updating an option.",
+                },
+                "config": {"type": "object", "description": "Field type settings, when the type takes any."},
+                "target": {
+                    "type": "string",
+                    "enum": ["global", "project", "board"],
+                    "description": "transfer: where the field should end up.",
+                },
+                "target_id": {"type": "integer", "description": "transfer: target project or board id."},
+                "after": {"type": "string", "description": "move_option: option id to sit after."},
+                "before": {"type": "string", "description": "move_option: option id to sit before."},
+            },
+            "required": ["action"],
         },
     ),
 ]
@@ -752,12 +1051,221 @@ async def handle_task_tool(name: str, args: dict[str, Any], api: WeeekAPI, kb: W
     if name == "weeek_delete_task":
         return await api.delete_task(args["task_id"])
     if name == "weeek_move_task":
-        return await api.move_task_to_column(args["task_id"], args["board_column_id"])
+        moves = []
+        if args.get("board_id") is not None:
+            moves.append(await api.move_task_to_board(args["task_id"], args["board_id"]))
+        if args.get("board_column_id") is not None:
+            moves.append(await api.move_task_to_column(args["task_id"], args["board_column_id"]))
+        if not moves:
+            raise ValueError("weeek_move_task needs board_column_id and/or board_id.")
+        return moves[-1]
     if name == "weeek_set_assignees":
         return await api.add_assignees(args["task_id"], args["assignees"])
     if name == "weeek_remove_assignees":
         return await api.remove_assignees(args["task_id"], args["assignees"])
+    if name == "weeek_set_task_parent":
+        body = {"parentId": args["parent_id"]}
+        for key, field in (("after", "after"), ("before", "before")):
+            if args.get(key) is not None:
+                body[field] = args[key]
+        return await api.set_task_parent(args["task_id"], body)
+    if name == "weeek_add_task_to_project":
+        return await api.add_task_location(
+            args["task_id"],
+            {"projectId": args["project_id"], "boardColumnId": args.get("board_column_id")},
+        )
+    if name == "weeek_remove_task_from_project":
+        return await api.remove_task_location(args["task_id"], args["project_id"])
+    if name == "weeek_set_watchers":
+        return await api.add_watchers(args["task_id"], args["watchers"])
+    if name == "weeek_remove_watchers":
+        return await api.remove_watchers(args["task_id"], args["watchers"])
+    if name == "weeek_task_timer":
+        return await api.task_timer(args["task_id"], running=args["action"] == "start")
+    if name == "weeek_manage_time_entry":
+        return await _handle_time_entry(args, api)
+    if name == "weeek_upload_attachment":
+        missing = [p for p in args["paths"] if not Path(p).expanduser().is_file()]
+        if missing:
+            raise ValueError("No such file(s): " + ", ".join(missing))
+        return await api.upload_attachments(args["task_id"], [str(Path(p).expanduser()) for p in args["paths"]])
+    if name == "weeek_get_attachment":
+        return await api.get_attachment(args["file_id"])
+    if name == "weeek_manage_tags":
+        return await _handle_tags(args, api)
+    if name == "weeek_manage_projects":
+        return await _handle_projects(args, api)
+    if name == "weeek_manage_boards":
+        return await _handle_boards(args, api)
+    if name == "weeek_manage_board_columns":
+        return await _handle_board_columns(args, api)
+    if name == "weeek_manage_portfolios":
+        return await _handle_portfolios(args, api)
+    if name == "weeek_manage_custom_fields":
+        return await _handle_custom_fields(args, api)
     raise ValueError(f"Unknown task tool: {name}")
+
+
+def _need(args: dict[str, Any], tool: str, action: str, *keys: str) -> None:
+    missing = [k for k in keys if args.get(k) is None]
+    if missing:
+        raise ValueError(f"{tool} {action!r} needs {', '.join(missing)}.")
+
+
+async def _handle_time_entry(args: dict[str, Any], api: WeeekAPI) -> Any:
+    action, task_id = args["action"], args["task_id"]
+    if action == "delete":
+        _need(args, "weeek_manage_time_entry", action, "entry_id")
+        return await api.delete_time_entry(task_id, args["entry_id"])
+    _need(args, "weeek_manage_time_entry", action, "user_id", "date", "duration")
+    body = {
+        "userId": args["user_id"],
+        "date": args["date"],
+        "duration": args["duration"],
+        "isOvertime": bool(args.get("is_overtime")),
+    }
+    if action == "create":
+        return await api.create_time_entry(task_id, body)
+    _need(args, "weeek_manage_time_entry", action, "entry_id")
+    return await api.update_time_entry(task_id, args["entry_id"], body)
+
+
+async def _handle_tags(args: dict[str, Any], api: WeeekAPI) -> Any:
+    action = args["action"]
+    if action == "list":
+        return await api.list_tags()
+    if action == "create":
+        _need(args, "weeek_manage_tags", action, "title")
+        return await api.create_tag(args["title"])
+    _need(args, "weeek_manage_tags", action, "tag_id")
+    if action == "delete":
+        return await api.delete_tag(args["tag_id"])
+    _need(args, "weeek_manage_tags", action, "title", "color")
+    return await api.update_tag(args["tag_id"], {"title": args["title"], "color": args["color"]})
+
+
+async def _handle_projects(args: dict[str, Any], api: WeeekAPI) -> Any:
+    action = args["action"]
+    if action == "create":
+        _need(args, "weeek_manage_projects", action, "name")
+        return await api.create_project(
+            {
+                "name": args["name"],
+                "isPrivate": bool(args.get("is_private")),
+                "description": args.get("description"),
+                "portfolioId": args.get("portfolio_id"),
+            }
+        )
+    _need(args, "weeek_manage_projects", action, "project_id")
+    if action == "delete":
+        return await api.delete_project(args["project_id"])
+    if action in ("archive", "unarchive"):
+        return await api.archive_project(args["project_id"], archived=action == "archive")
+    # color is optional in Weeek's spec but rejected as missing by the API (422).
+    _need(args, "weeek_manage_projects", action, "name", "color")
+    return await api.update_project(
+        args["project_id"],
+        {"name": args["name"], "isPrivate": bool(args.get("is_private")), "color": args["color"]},
+    )
+
+
+async def _handle_boards(args: dict[str, Any], api: WeeekAPI) -> Any:
+    action = args["action"]
+    if action == "create":
+        _need(args, "weeek_manage_boards", action, "name", "project_id")
+        return await api.create_board({"name": args["name"], "projectId": args["project_id"]})
+    _need(args, "weeek_manage_boards", action, "board_id")
+    if action == "delete":
+        return await api.delete_board(args["board_id"])
+    if action == "move":
+        return await api.move_board(args["board_id"], args.get("upper_board_id"))
+    _need(args, "weeek_manage_boards", action, "name")
+    return await api.update_board(args["board_id"], {"name": args["name"]})
+
+
+async def _handle_board_columns(args: dict[str, Any], api: WeeekAPI) -> Any:
+    action = args["action"]
+    if action == "create":
+        _need(args, "weeek_manage_board_columns", action, "name", "board_id")
+        return await api.create_board_column({"name": args["name"], "boardId": args["board_id"]})
+    _need(args, "weeek_manage_board_columns", action, "board_column_id")
+    if action == "delete":
+        return await api.delete_board_column(args["board_column_id"])
+    if action == "move":
+        return await api.move_board_column(args["board_column_id"], args.get("upper_board_column_id"))
+    _need(args, "weeek_manage_board_columns", action, "name")
+    return await api.update_board_column(args["board_column_id"], {"name": args["name"]})
+
+
+async def _handle_portfolios(args: dict[str, Any], api: WeeekAPI) -> Any:
+    action = args["action"]
+    if action == "list":
+        return await api.list_portfolios(
+            search=args.get("search"),
+            parentId=args.get("parent_id"),
+            limit=args.get("limit"),
+            offset=args.get("offset"),
+        )
+    if action == "create":
+        _need(args, "weeek_manage_portfolios", action, "name")
+        return await api.create_portfolio({"name": args["name"], "parentId": args.get("parent_id")})
+    _need(args, "weeek_manage_portfolios", action, "portfolio_id")
+    if action == "get":
+        return await api.get_portfolio(args["portfolio_id"])
+    if action == "delete":
+        return await api.delete_portfolio(args["portfolio_id"])
+    _need(args, "weeek_manage_portfolios", action, "name")
+    return await api.update_portfolio(args["portfolio_id"], {"name": args["name"]})
+
+
+async def _handle_custom_fields(args: dict[str, Any], api: WeeekAPI) -> Any:
+    action = args["action"]
+    if action == "list_global":
+        return await api.list_global_custom_fields()
+
+    scope = args.get("scope", "global")
+    scope_id = args.get("scope_id")
+    if scope != "global" and scope_id is None:
+        raise ValueError(f"weeek_manage_custom_fields scope {scope!r} needs scope_id.")
+
+    if action == "create":
+        _need(args, "weeek_manage_custom_fields", action, "type")
+        return await api.create_custom_field(
+            scope, scope_id, {"name": args.get("name"), "type": args["type"], "config": args.get("config")}
+        )
+
+    _need(args, "weeek_manage_custom_fields", action, "field_id")
+    field_id = args["field_id"]
+    if action == "update":
+        return await api.update_custom_field(
+            scope, scope_id, field_id, {"name": args.get("name"), "config": args.get("config")}
+        )
+    if action == "delete":
+        return await api.delete_custom_field(scope, scope_id, field_id)
+    if action == "transfer":
+        _need(args, "weeek_manage_custom_fields", action, "target")
+        target = args["target"]
+        if target != "global" and args.get("target_id") is None:
+            raise ValueError("weeek_manage_custom_fields 'transfer' needs target_id for a project or board target.")
+        return await api.transfer_custom_field(scope, scope_id, field_id, target, args.get("target_id"))
+    if action == "create_option":
+        _need(args, "weeek_manage_custom_fields", action, "name", "color")
+        return await api.create_custom_field_option(
+            scope, scope_id, field_id, {"name": args["name"], "color": args["color"]}
+        )
+
+    _need(args, "weeek_manage_custom_fields", action, "option_id")
+    option_id = args["option_id"]
+    if action == "update_option":
+        _need(args, "weeek_manage_custom_fields", action, "name", "color")
+        return await api.update_custom_field_option(
+            scope, scope_id, field_id, option_id, {"name": args["name"], "color": args["color"]}
+        )
+    if action == "delete_option":
+        return await api.delete_custom_field_option(scope, scope_id, field_id, option_id)
+    return await api.move_custom_field_option(
+        scope, scope_id, field_id, option_id, {"after": args.get("after"), "before": args.get("before")}
+    )
 
 
 def _doc_payload(doc: KBDocument) -> dict[str, Any]:

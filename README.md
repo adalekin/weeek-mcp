@@ -89,7 +89,17 @@ Add to `claude_desktop_config.json`:
 `weeek_list_boards`, `weeek_list_board_columns`, `weeek_list_tasks`,
 `weeek_get_task`, `weeek_create_task`, `weeek_update_task`, `weeek_complete_task`,
 `weeek_uncomplete_task`, `weeek_delete_task`, `weeek_move_task`,
-`weeek_set_assignees`, `weeek_remove_assignees`, `weeek_list_custom_fields`.
+`weeek_set_assignees`, `weeek_remove_assignees`, `weeek_set_task_parent`,
+`weeek_add_task_to_project`, `weeek_remove_task_from_project`, `weeek_set_watchers`,
+`weeek_remove_watchers`, `weeek_task_timer`, `weeek_manage_time_entry`,
+`weeek_upload_attachment`, `weeek_get_attachment`, `weeek_list_custom_fields`.
+
+**Workspace admin:** `weeek_manage_tags`, `weeek_manage_projects`,
+`weeek_manage_boards`, `weeek_manage_board_columns`, `weeek_manage_portfolios`,
+`weeek_manage_custom_fields`. These take an `action` (create/update/delete/…) rather
+than one tool per operation — the CRUD is regular and the tool list stays readable.
+Custom fields live per board, per project or workspace-wide, so that tool takes a
+`scope` (`global`/`project`/`board`) plus `scope_id`.
 
 Priority takes either Weeek's number or its label — `0` low (Низкий), `1` medium
 (Средний), `2` high (Высокий), `3` hold (Замороженный).
