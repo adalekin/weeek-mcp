@@ -89,7 +89,16 @@ Add to `claude_desktop_config.json`:
 `weeek_list_boards`, `weeek_list_board_columns`, `weeek_list_tasks`,
 `weeek_get_task`, `weeek_create_task`, `weeek_update_task`, `weeek_complete_task`,
 `weeek_uncomplete_task`, `weeek_delete_task`, `weeek_move_task`,
-`weeek_set_assignees`, `weeek_remove_assignees`.
+`weeek_set_assignees`, `weeek_remove_assignees`, `weeek_list_custom_fields`.
+
+Priority takes either Weeek's number or its label — `0` low (Низкий), `1` medium
+(Средний), `2` high (Высокий), `3` hold (Замороженный).
+
+Custom fields are set with `custom_fields`: on an existing task by field name or id
+(`{"Ссылка на фичу": "https://…"}`, `null` clears a field, a select takes the option
+name or id), on `weeek_create_task` by id only — `weeek_list_custom_fields` lists
+them. A field belongs to the projects it was added to, and Weeek stores nothing
+when you write to one it doesn't cover, so the write is verified and reported.
 
 **Knowledge base:** `weeek_kb_search`, `weeek_kb_list`, `weeek_kb_read`,
 `weeek_kb_create`, `weeek_kb_update`, `weeek_kb_icons`, `weeek_kb_delete`.

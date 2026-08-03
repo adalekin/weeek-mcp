@@ -4,12 +4,21 @@ Split into two groups:
   * task tools  -> Weeek public REST API (weeek_api.WeeekAPI)
   * kb tools    -> knowledge base search over Playwright (kb.client.WeeekKB)
 
-Tool input schemas mirror the Weeek OpenAPI spec. The server module wires these
-handlers to the low-level MCP Server.
+Tool input schemas mirror the Weeek OpenAPI spec, with two deliberate departures
+for callers that work from labels rather than ids: priority also accepts its UI
+label, and custom field values may be keyed by field name. The server module
+wires these handlers to the low-level MCP Server.
+
+Weeek answers several writes it did not perform with ``success: true`` (unknown
+custom field ids, avatar fields in an article body, ``parentId`` on a document).
+The rule here: validate against reference data before the write when there is
+any — and when there is none, compare the write's response against what was
+asked for, so a dropped value surfaces as an error instead of a silent no-op.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import mcp.types as types
@@ -26,6 +35,147 @@ def kb_uri(doc_id: str) -> str:
 
 def kb_doc_id_from_uri(uri: str) -> str:
     return uri.split("://", 1)[-1].strip("/")
+
+
+# --------------------------------------------------------------------------- priorities
+# Weeek stores task priority as 0..3; these are the labels its own UI shows.
+PRIORITIES = {"low": 0, "medium": 1, "high": 2, "hold": 3}
+PRIORITY_DESCRIPTION = (
+    "Priority as a number or a label: 0 low (Низкий), 1 medium (Средний), 2 high (Высокий), 3 hold (Замороженный)."
+)
+PRIORITY_SCHEMA = {
+    "type": ["integer", "string"],
+    "enum": [0, 1, 2, 3, *PRIORITIES],
+    "description": PRIORITY_DESCRIPTION,
+}
+
+
+def _priority(value: Any) -> Any:
+    """Accept either Weeek's numeric priority or one of its labels."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return PRIORITIES[value.strip().casefold()]
+    except KeyError:
+        raise ValueError(f"Unknown priority {value!r}. Use 0-3 or one of: {', '.join(PRIORITIES)}.") from None
+
+
+# --------------------------------------------------------------------------- custom fields
+async def task_custom_fields(api: WeeekAPI, task_id: int) -> list[dict[str, Any]]:
+    task = (await api.get_task(task_id)).get("task") or {}
+    return task.get("customFields") or []
+
+
+async def project_custom_fields(api: WeeekAPI, project_id: int) -> list[dict[str, Any]]:
+    """Custom fields of a project, read off one of its tasks.
+
+    The public API has no schema endpoint for them — ``/tm/custom-fields`` and a
+    project's own ``customFields`` both come back empty — while every task carries
+    the full field list. An empty project therefore has nothing to read.
+    """
+    tasks = (await api.list_tasks(projectId=project_id, perPage=1)).get("tasks") or []
+    return (tasks[0].get("customFields") or []) if tasks else []
+
+
+def _unknown_field_message(key: Any, fields: list[dict[str, Any]]) -> str:
+    if not fields:
+        return f"Unknown custom field {key!r}: this task has none."
+    named = [f["name"] for f in fields if f.get("name")]
+    unnamed = [f["id"] for f in fields if not f.get("name")]
+    parts = [f"Unknown custom field {key!r}."]
+    if named:
+        parts.append("Available: " + ", ".join(named) + ".")
+    if unnamed:
+        parts.append("Unnamed fields are addressed by id: " + ", ".join(unnamed) + ".")
+    return " ".join(parts)
+
+
+def _custom_field_value(field: dict[str, Any], value: Any) -> Any:
+    """Select fields are written by option id, so map a chosen option name onto it."""
+    options = field.get("options") or []
+    if not options or not isinstance(value, str):
+        return value
+    for option in options:
+        if option.get("id") == value:
+            return value
+    for option in options:
+        if (option.get("name") or "").strip().casefold() == value.strip().casefold():
+            return option["id"]
+    label = field.get("name") or field.get("id")
+    raise ValueError(
+        f"Custom field {label!r} has no option {value!r}. Available: "
+        + ", ".join(o.get("name") or o.get("id", "") for o in options)
+    )
+
+
+def dropped_custom_fields(
+    response: Any, requested: dict[str, Any], fields: list[dict[str, Any]] | None = None
+) -> list[str]:
+    """Values Weeek did not store, by name where we know it.
+
+    A task lists every custom field of the workspace, but a field only applies to
+    the projects it was added to — writing to one of the others comes back
+    ``success: true`` with the value silently missing.
+
+    The check reads the fields the write response echoes back. A response that
+    lists none of them says nothing about what was stored, so it is treated as
+    "nothing to check" rather than as a task that lost every value.
+    """
+    task = (response or {}).get("task") or {}
+    stored = task.get("customFields") or []
+    if not stored:
+        return []
+    applied = {f.get("id"): f.get("value") for f in stored}
+    labels = {f.get("id"): str(f.get("name") or f.get("id")) for f in fields or []}
+    return [
+        labels.get(fid, str(fid)) for fid, value in requested.items() if value is not None and applied.get(fid) is None
+    ]
+
+
+_FIELD_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def _report_created_task_fields(created: Any, requested: dict[str, Any]) -> None:
+    """Check a freshly created task's custom fields, naming the task in any complaint."""
+    task_id = ((created or {}).get("task") or {}).get("id")
+    not_ids = [key for key in requested if not _FIELD_ID.match(str(key))]
+    if not_ids:
+        raise ValueError(
+            f"Task {task_id} was created, but on create custom_fields must be keyed by field id: "
+            + ", ".join(repr(k) for k in not_ids)
+            + ". Set those values with weeek_update_task, which also accepts field names."
+        )
+    dropped = dropped_custom_fields(created, requested)
+    if dropped:
+        raise ValueError(
+            f"Task {task_id} was created, but Weeek did not store "
+            + ", ".join(repr(d) for d in dropped)
+            + " — a custom field only applies to the projects it was added to. Fix the value with "
+            "weeek_update_task rather than creating the task again."
+        )
+
+
+def resolve_custom_fields(fields: list[dict[str, Any]], values: dict[str, Any]) -> dict[str, Any]:
+    """Turn {field name or id: value} into the {field id: value} body Weeek expects.
+
+    Weeek accepts unknown field ids with ``success: true`` and writes nothing, so
+    every key is checked against the task's own fields before the write. A value
+    of None clears the field.
+    """
+    by_id = {f.get("id"): f for f in fields}
+    by_name: dict[str, dict[str, Any]] = {}
+    for field in fields:
+        name = field.get("name")
+        if name:
+            by_name.setdefault(name.strip().casefold(), field)
+
+    resolved: dict[str, Any] = {}
+    for key, value in values.items():
+        match = by_id.get(key) or by_name.get(str(key).strip().casefold())
+        if match is None:
+            raise ValueError(_unknown_field_message(key, fields))
+        resolved[match["id"]] = _custom_field_value(match, value)
+    return resolved
 
 
 # --------------------------------------------------------------------------- schemas
@@ -75,7 +225,7 @@ TASK_TOOLS: list[types.Tool] = [
                 "user_id": {"type": "string", "description": "Assignee id"},
                 "completed": {"type": "boolean"},
                 "type": {"type": "string", "enum": ["action", "meet", "call"]},
-                "priority": {"type": "integer", "enum": [0, 1, 2, 3]},
+                "priority": PRIORITY_SCHEMA,
                 "tags": {"type": "array", "items": {"type": "integer"}},
                 "search": {"type": "string"},
                 "day": {"type": "string", "description": "Y-m-d"},
@@ -113,7 +263,16 @@ TASK_TOOLS: list[types.Tool] = [
                 },
                 "description": {"type": "string"},
                 "type": {"type": "string", "enum": ["action", "meet", "call"]},
-                "priority": {"type": "integer", "enum": [0, 1, 2, 3]},
+                "priority": PRIORITY_SCHEMA,
+                "custom_fields": {
+                    "type": "object",
+                    "description": (
+                        "Custom field values keyed by field id (names only work on an "
+                        "existing task, via weeek_update_task) — get the ids from "
+                        "weeek_list_custom_fields. For a select field pass the option id. "
+                        "A field that does not belong to this project is reported as an error."
+                    ),
+                },
                 "day": {"type": "string", "description": "Y-m-d"},
                 "user_id": {"type": "string", "description": "Assignee id"},
                 "parent_id": {"type": "integer", "description": "Parent task id for a subtask"},
@@ -123,13 +282,15 @@ TASK_TOOLS: list[types.Tool] = [
     ),
     types.Tool(
         name="weeek_update_task",
-        description="Update a task's fields (title, priority, type, dates, duration, tags).",
+        description=(
+            "Update a task's fields (title, priority, type, dates, duration, tags) and its custom field values."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
                 "task_id": {"type": "integer"},
                 "title": {"type": "string"},
-                "priority": {"type": "integer", "enum": [0, 1, 2, 3]},
+                "priority": PRIORITY_SCHEMA,
                 "type": {"type": "string", "enum": ["action", "meet", "call"]},
                 "start_date": {"type": "string", "description": "Y-m-d"},
                 "due_date": {"type": "string", "description": "Y-m-d"},
@@ -137,8 +298,33 @@ TASK_TOOLS: list[types.Tool] = [
                 "due_date_time": {"type": "string", "description": "ISO 8601"},
                 "duration": {"type": "integer", "description": "Estimate in minutes"},
                 "tags": {"type": "array", "items": {"type": "integer"}},
+                "custom_fields": {
+                    "type": "object",
+                    "description": (
+                        "Custom field values keyed by field name or field id, e.g. "
+                        '{"Ссылка на фичу": "https://..."}. For a select field pass the '
+                        "option name or its id; pass null to clear a field. Names are "
+                        "matched against this task's own fields, and a field that does not "
+                        "belong to this task's project is reported as an error."
+                    ),
+                },
             },
             "required": ["task_id"],
+        },
+    ),
+    types.Tool(
+        name="weeek_list_custom_fields",
+        description=(
+            "List the task custom fields visible in a project (id, name, type, select "
+            "options). Weeek's public API exposes no schema endpoint for them, so this "
+            "reads the fields off one of the project's tasks — a project with no tasks yet "
+            "returns nothing. Tasks list every field of the workspace, so some of them may "
+            "belong to other projects; writing to one of those is reported as an error."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {"project_id": {"type": "integer"}},
+            "required": ["project_id"],
         },
     ),
     types.Tool(
@@ -384,7 +570,7 @@ async def handle_task_tool(name: str, args: dict[str, Any], api: WeeekAPI) -> An
             userId=args.get("user_id"),
             completed=args.get("completed"),
             type=args.get("type"),
-            priority=args.get("priority"),
+            priority=_priority(args.get("priority")),
             tags=args.get("tags"),
             search=args.get("search"),
             day=args.get("day"),
@@ -395,13 +581,29 @@ async def handle_task_tool(name: str, args: dict[str, Any], api: WeeekAPI) -> An
         )
     if name == "weeek_get_task":
         return await api.get_task(args["task_id"])
+    if name == "weeek_list_custom_fields":
+        fields = await project_custom_fields(api, args["project_id"])
+        return [
+            {
+                "id": f.get("id"),
+                "name": f.get("name"),
+                "type": f.get("type"),
+                **(
+                    {"options": [{"id": o.get("id"), "name": o.get("name")} for o in f["options"]]}
+                    if f.get("options")
+                    else {}
+                ),
+            }
+            for f in fields
+        ]
     if name == "weeek_create_task":
         body = {
             "title": args["title"],
             "description": args.get("description"),
             "day": args.get("day"),
             "type": args.get("type"),
-            "priority": args.get("priority"),
+            "priority": _priority(args.get("priority")),
+            "customFields": args.get("custom_fields"),
             "userId": args.get("user_id"),
             "parentId": args.get("parent_id"),
             "locations": [
@@ -411,11 +613,16 @@ async def handle_task_tool(name: str, args: dict[str, Any], api: WeeekAPI) -> An
                 }
             ],
         }
-        return await api.create_task(body)
+        created = await api.create_task(body)
+        if args.get("custom_fields"):
+            # The task already exists at this point, so every complaint has to say so —
+            # otherwise the obvious retry is to create it a second time.
+            _report_created_task_fields(created, args["custom_fields"])
+        return created
     if name == "weeek_update_task":
         body = {
             "title": args.get("title"),
-            "priority": args.get("priority"),
+            "priority": _priority(args.get("priority")),
             "type": args.get("type"),
             "startDate": args.get("start_date"),
             "dueDate": args.get("due_date"),
@@ -424,7 +631,22 @@ async def handle_task_tool(name: str, args: dict[str, Any], api: WeeekAPI) -> An
             "duration": args.get("duration"),
             "tags": args.get("tags"),
         }
-        return await api.update_task(args["task_id"], body)
+        if not args.get("custom_fields"):
+            return await api.update_task(args["task_id"], body)
+
+        fields = await task_custom_fields(api, args["task_id"])
+        requested = resolve_custom_fields(fields, args["custom_fields"])
+        body["customFields"] = requested
+        updated = await api.update_task(args["task_id"], body)
+        dropped = dropped_custom_fields(updated, requested, fields)
+        if dropped:
+            raise ValueError(
+                "Weeek did not store "
+                + ", ".join(repr(d) for d in dropped)
+                + " — a custom field only applies to the projects it was added to. Any other "
+                "values in the same call were saved."
+            )
+        return updated
     if name == "weeek_complete_task":
         return await api.complete_task(args["task_id"])
     if name == "weeek_uncomplete_task":
