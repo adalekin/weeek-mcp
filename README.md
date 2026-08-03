@@ -92,11 +92,15 @@ Add to `claude_desktop_config.json`:
 `weeek_set_assignees`, `weeek_remove_assignees`.
 
 **Knowledge base:** `weeek_kb_search`, `weeek_kb_list`, `weeek_kb_read`,
-`weeek_kb_create`, `weeek_kb_update`, `weeek_kb_delete`.
+`weeek_kb_create`, `weeek_kb_update`, `weeek_kb_icons`, `weeek_kb_delete`.
 
 > `weeek_kb_update` with new content launches a short headless browser session (a few
 > seconds) to drive Weeek's editor, because document bodies are saved over a
 > collaborative websocket rather than REST. The document id is preserved.
+
+Documents can carry an icon: pass `icon` to `weeek_kb_create`/`weeek_kb_update` as a
+single emoji (`🚀`) or as one of Weeek's built-in icon names (`weeek_kb_icons` lists
+them); an empty `icon` removes it. Listings report the icon a document currently has.
 
 ### Knowledge base → Claude Desktop Context
 

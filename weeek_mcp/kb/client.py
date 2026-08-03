@@ -8,15 +8,23 @@ only launched to (re)acquire cookies when they are missing or expired.
 Endpoints (base ``{internal_api_base}/ws/{workspace_id}``):
   GET /kb/articles/search?search=&offset=0&limit=&isTrashed=0  -> flat article list
   GET /kb/articles/{id}                                        -> article + content
+  POST /kb/articles/{id}/avatar {objectType, objectId}         -> set the document icon
+  DELETE /kb/articles/{id}/avatar                              -> clear the icon
+
+Reference data for icons lives outside the workspace tree, at
+``{internal_api_base}/app/avatars`` (colors, emoji groups, built-in icons).
 
 Note: ``parentId`` in the create/update article body is silently ignored by the
 API (confirmed by network capture of the web app) — nesting is a separate write,
-``PATCH /kb/hierarchy`` with ``{targetId, placeId, direction: "into"}``.
+``PATCH /kb/hierarchy`` with ``{targetId, placeId, direction: "into"}``. The
+document icon behaves the same way: avatar fields in the article body are
+swallowed, and only the ``/avatar`` subresource actually writes it.
 
 Public surface (stable for callers):
     await kb.list_documents()      -> list[KBDocument]
     await kb.read_document(doc_id) -> str  (markdown)
     await kb.search(query)         -> list[KBDocument]
+    await kb.set_icon(doc_id, "🚀")-> str | None  (label of the icon now set)
 """
 
 from __future__ import annotations
@@ -46,6 +54,30 @@ class KBDocument:
     id: str
     title: str
     path: str  # breadcrumb trail, e.g. "Технологии / Провайдеры"
+    icon: str | None = None  # emoji character or built-in icon name, when set
+
+
+_VARIATION_SELECTOR = "\ufe0f"
+
+
+def _emoji_key(text: str) -> str:
+    """Codepoint key for an emoji, e.g. "🚀" -> "1f680".
+
+    The variation selector is dropped so that "☄️" and "☄" resolve to the same
+    catalog entry — Weeek stores some emoji with it and some without.
+    """
+    return " ".join(f"{ord(c):04x}" for c in text if c != _VARIATION_SELECTOR)
+
+
+def _emoji_key_from_catalog(unicode_spec: str) -> str:
+    """Same key, from the catalog's notation: "U+2604 U+FE0F" -> "2604"."""
+    points = [int(p[2:], 16) for p in unicode_spec.split() if p.upper().startswith("U+")]
+    return " ".join(f"{p:04x}" for p in points if p != 0xFE0F)
+
+
+def _emoji_char(unicode_spec: str) -> str:
+    points = [int(p[2:], 16) for p in unicode_spec.split() if p.upper().startswith("U+")]
+    return "".join(chr(p) for p in points)
 
 
 _UNSAFE = re.compile(r'[/\\:*?"<>|]+')
@@ -71,6 +103,10 @@ class WeeekKB:
         self._ws: str | None = config.workspace_id
         self._cache: list[KBDocument] | None = None
         self._cache_ts: float = 0.0
+        self._icons: dict[str, str] = {}  # lowercased icon name -> id
+        self._emoji: dict[str, str] = {}  # codepoint key -> id
+        self._labels: dict[str, str] = {}  # avatar id -> emoji character / icon name
+        self._catalog_loaded = False
         self._log = make_logger(config.log_path, "weeek-mcp/kb")
 
     # ------------------------------------------------------------- http/session
@@ -146,7 +182,16 @@ class WeeekKB:
             params={"search": query, "offset": 0, "limit": _PAGE_LIMIT, "isTrashed": 0},
         )
         articles = data.get("articles") or []
-        return [KBDocument(id=str(a["id"]), title=a.get("name") or str(a["id"]), path=_breadcrumb(a)) for a in articles]
+        await self._load_catalog_quietly()  # to name the icons the articles carry
+        return [
+            KBDocument(
+                id=str(a["id"]),
+                title=a.get("name") or str(a["id"]),
+                path=_breadcrumb(a),
+                icon=self._icon_label(a.get("avatar")),
+            )
+            for a in articles
+        ]
 
     async def list_documents(self, *, force: bool = False) -> list[KBDocument]:
         now = time.monotonic()
@@ -236,14 +281,101 @@ class WeeekKB:
             {"targetId": int(doc_id), "placeId": int(parent_id), "direction": "into"},
         )
 
+    # ------------------------------------------------------------- icons
+    async def _load_catalog(self) -> None:
+        """Fetch and index Weeek's avatar catalog (built-in icons + emoji).
+
+        Static reference data shared by the whole app, so one fetch per process.
+        """
+        if self._catalog_loaded:
+            return
+        data = (await self._get("/app/avatars")).get("data") or {}
+        for icon in data.get("icons") or []:
+            name = icon.get("name") or ""
+            self._icons.setdefault(name.casefold(), icon["id"])
+            self._labels[icon["id"]] = name
+        for group in data.get("emojiGroups") or []:
+            for emoji in group.get("emojis") or []:
+                spec = emoji.get("unicode") or ""
+                if not spec:
+                    continue
+                self._emoji.setdefault(_emoji_key_from_catalog(spec), emoji["id"])
+                self._labels[emoji["id"]] = _emoji_char(spec)
+        self._catalog_loaded = True
+
+    async def _load_catalog_quietly(self) -> None:
+        """Catalog load for read paths — a hiccup here must not break listing.
+
+        Broad on purpose: reference data for icon names is not worth failing a
+        document listing over, whatever went wrong fetching or parsing it.
+        """
+        try:
+            await self._load_catalog()
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"icon catalog unavailable: {exc}")
+
+    def _icon_label(self, avatar: dict | None) -> str | None:
+        """The icon of an article as an emoji character or a built-in icon name."""
+        if not isinstance(avatar, dict) or avatar.get("objectType") not in ("icon", "emoji"):
+            return None
+        return self._labels.get(avatar.get("objectId") or "")
+
+    async def icon_names(self) -> list[str]:
+        """Names of the built-in icons, as accepted by ``set_icon``."""
+        await self._load_catalog()
+        return sorted((self._labels[i] for i in self._icons.values()), key=str.casefold)
+
+    async def _resolve_icon(self, icon: str) -> dict:
+        await self._load_catalog()
+        spec = icon.strip()
+        emoji_id = self._emoji.get(_emoji_key(spec))
+        if emoji_id:
+            return {"objectType": "emoji", "objectId": emoji_id}
+        icon_id = self._icons.get(spec.casefold())
+        if icon_id:
+            return {"objectType": "icon", "objectId": icon_id}
+        raise KBError(
+            f"Unknown icon {icon!r}. Pass a single emoji character (e.g. 🚀) or one of: "
+            + ", ".join(await self.icon_names())
+        )
+
+    async def _write_icon(self, doc_id: str, avatar: dict) -> str | None:
+        ws = await self._workspace()
+        await self._post(f"/ws/{ws}/kb/articles/{doc_id}/avatar", avatar)
+        self._invalidate_cache()
+        return self._labels.get(avatar["objectId"])
+
+    async def set_icon(self, doc_id: str, icon: str | None) -> str | None:
+        """Set a document's icon to an emoji or a built-in icon; empty clears it.
+
+        Returns the label now shown for the document (None once cleared).
+        """
+        if not (icon or "").strip():
+            ws = await self._workspace()
+            await self._delete(f"/ws/{ws}/kb/articles/{doc_id}/avatar")
+            self._invalidate_cache()
+            return None
+        return await self._write_icon(doc_id, await self._resolve_icon(icon or ""))
+
     async def create_document(
-        self, title: str, *, markdown: str | None = None, parent_id: str | int | None = None
+        self,
+        title: str,
+        *,
+        markdown: str | None = None,
+        parent_id: str | int | None = None,
+        icon: str | None = None,
     ) -> KBDocument:
         ws = await self._workspace()
+        # Resolve the icon first: an unknown one must fail before a document exists,
+        # not leave a stray document behind for the caller to notice and clean up.
+        avatar = await self._resolve_icon(icon) if icon else None
+
         body: dict = {"name": title, "content": markdown_to_doc(markdown) if markdown else {}}
         data = await self._post(f"/ws/{ws}/kb/articles", body)
         art = data.get("article") or {}
         doc_id = str(art.get("id"))
+
+        label = await self._write_icon(doc_id, avatar) if avatar is not None else None
 
         if parent_id is not None:
             await self._set_parent(doc_id, parent_id)
@@ -252,7 +384,7 @@ class WeeekKB:
             art = fresh.get("article") or art
 
         self._invalidate_cache()
-        return KBDocument(id=doc_id, title=art.get("name") or title, path=_breadcrumb(art))
+        return KBDocument(id=doc_id, title=art.get("name") or title, path=_breadcrumb(art), icon=label)
 
     async def rename_document(self, doc_id: str, title: str) -> None:
         ws = await self._workspace()

@@ -14,7 +14,7 @@ from typing import Any
 
 import mcp.types as types
 
-from .kb.client import WeeekKB
+from .kb.client import KBDocument, WeeekKB
 from .weeek_api import WeeekAPI
 
 KB_URI_SCHEME = "weeek-kb"
@@ -263,6 +263,10 @@ KB_TOOLS: list[types.Tool] = [
                     ),
                 },
                 "parent_id": {"type": "string", "description": "Parent document id, for nesting."},
+                "icon": {
+                    "type": "string",
+                    "description": "Document icon: a single emoji (e.g. 🚀) or a built-in icon name from weeek_kb_icons.",
+                },
             },
             "required": ["title"],
         },
@@ -270,11 +274,12 @@ KB_TOOLS: list[types.Tool] = [
     types.Tool(
         name="weeek_kb_update",
         description=(
-            "Update a knowledge base document. Rename via title, and/or replace the body "
-            "via content_markdown — same Markdown feature set as weeek_kb_create "
-            "(headings, nested lists, tables, images, bold/italic/strike/code/links). "
-            "Note: content replacement drives Weeek's editor in a headless browser (a "
-            "few seconds) because bodies sync over a collaborative channel, not REST."
+            "Update a knowledge base document. Rename via title, change its icon, and/or "
+            "replace the body via content_markdown — same Markdown feature set as "
+            "weeek_kb_create (headings, nested lists, tables, images, "
+            "bold/italic/strike/code/links). Note: content replacement drives Weeek's "
+            "editor in a headless browser (a few seconds) because bodies sync over a "
+            "collaborative channel, not REST."
         ),
         inputSchema={
             "type": "object",
@@ -289,9 +294,26 @@ KB_TOOLS: list[types.Tool] = [
                         "images, and inline bold/italic/strike/code/links."
                     ),
                 },
+                "icon": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "New document icon: a single emoji (e.g. 🚀) or one of the built-in "
+                        "icon names from weeek_kb_icons. Pass null or an empty string to "
+                        "remove the current icon."
+                    ),
+                },
             },
             "required": ["doc_id"],
         },
+    ),
+    types.Tool(
+        name="weeek_kb_icons",
+        description=(
+            "List the built-in icon names accepted by the icon argument of "
+            "weeek_kb_create/weeek_kb_update. Any single emoji works too, so call this "
+            "only when you specifically want one of Weeek's own icons."
+        ),
+        inputSchema={"type": "object", "properties": {}},
     ),
     types.Tool(
         name="weeek_kb_move",
@@ -418,22 +440,29 @@ async def handle_task_tool(name: str, args: dict[str, Any], api: WeeekAPI) -> An
     raise ValueError(f"Unknown task tool: {name}")
 
 
+def _doc_payload(doc: KBDocument) -> dict[str, Any]:
+    # icon is always present so its absence reads as "no icon", not as a field we forgot.
+    return {"id": doc.id, "title": doc.title, "path": doc.path, "uri": kb_uri(doc.id), "icon": doc.icon}
+
+
 async def handle_kb_tool(name: str, args: dict[str, Any], kb: WeeekKB) -> Any:
     if name == "weeek_kb_search":
-        docs = await kb.search(args["query"])
-        return [{"id": d.id, "title": d.title, "path": d.path, "uri": kb_uri(d.id)} for d in docs]
+        return [_doc_payload(d) for d in await kb.search(args["query"])]
     if name == "weeek_kb_list":
         docs = await kb.list_documents(force=bool(args.get("force_refresh")))
-        return [{"id": d.id, "title": d.title, "path": d.path, "uri": kb_uri(d.id)} for d in docs]
+        return [_doc_payload(d) for d in docs]
     if name == "weeek_kb_read":
         return await kb.read_document(args["doc_id"])
+    if name == "weeek_kb_icons":
+        return await kb.icon_names()
     if name == "weeek_kb_create":
         doc = await kb.create_document(
             args["title"],
             markdown=args.get("content_markdown"),
             parent_id=args.get("parent_id"),
+            icon=args.get("icon"),
         )
-        return {"id": doc.id, "title": doc.title, "path": doc.path, "uri": kb_uri(doc.id)}
+        return _doc_payload(doc)
     if name == "weeek_kb_update":
         actions = []
         if args.get("title") is not None:
@@ -442,8 +471,11 @@ async def handle_kb_tool(name: str, args: dict[str, Any], kb: WeeekKB) -> Any:
         if args.get("content_markdown") is not None:
             await kb.update_content(args["doc_id"], args["content_markdown"])
             actions.append("content replaced")
+        if "icon" in args:
+            label = await kb.set_icon(args["doc_id"], args["icon"])
+            actions.append(f"icon set to {label}" if label else "icon cleared")
         if not actions:
-            raise ValueError("weeek_kb_update needs title and/or content_markdown.")
+            raise ValueError("weeek_kb_update needs title, content_markdown and/or icon.")
         return {"id": args["doc_id"], "updated": actions}
     if name == "weeek_kb_move":
         await kb.move_document(args["doc_id"], args["parent_id"])
