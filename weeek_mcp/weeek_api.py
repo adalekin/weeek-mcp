@@ -50,7 +50,12 @@ class WeeekAPI:
             raise WeeekAPIError(resp.status_code, body)
         if resp.status_code == 204 or not resp.content:
             return {"success": True}
-        return resp.json()
+        data = resp.json()
+        # Refusals that are not HTTP errors: a plan limit answers 200 with
+        # {"success": false, "reason": "limit"} and nothing created.
+        if isinstance(data, dict) and data.get("success") is False:
+            raise WeeekAPIError(resp.status_code, data)
+        return data
 
     # ------------------------------------------------------------------ workspace
     async def whoami(self) -> Any:

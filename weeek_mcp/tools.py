@@ -14,6 +14,10 @@ custom field ids, avatar fields in an article body, ``parentId`` on a document).
 The rule here: validate against reference data before the write when there is
 any — and when there is none, compare the write's response against what was
 asked for, so a dropped value surfaces as an error instead of a silent no-op.
+
+Its PUT endpoints replace rather than patch: a field they require but the caller
+did not mention has to be carried over from the current value, never defaulted.
+Defaulting turns "rename this project" into "rename it and make it public".
 """
 
 from __future__ import annotations
@@ -1112,12 +1116,21 @@ def _need(args: dict[str, Any], tool: str, action: str, *keys: str) -> None:
         raise ValueError(f"{tool} {action!r} needs {', '.join(missing)}.")
 
 
+def _unknown_action(tool: str, action: Any, *known: str) -> ValueError:
+    """An action nobody handled must not fall through to a neighbouring one."""
+    return ValueError(f"{tool} does not know action {action!r}. Use one of: {', '.join(known)}.")
+
+
 async def _handle_time_entry(args: dict[str, Any], api: WeeekAPI) -> Any:
+    tool = "weeek_manage_time_entry"
     action, task_id = args["action"], args["task_id"]
     if action == "delete":
-        _need(args, "weeek_manage_time_entry", action, "entry_id")
+        _need(args, tool, action, "entry_id")
         return await api.delete_time_entry(task_id, args["entry_id"])
-    _need(args, "weeek_manage_time_entry", action, "user_id", "date", "duration")
+    if action not in ("create", "update"):
+        raise _unknown_action(tool, action, "create", "update", "delete")
+
+    _need(args, tool, action, "user_id", "date", "duration")
     body = {
         "userId": args["user_id"],
         "date": args["date"],
@@ -1126,28 +1139,43 @@ async def _handle_time_entry(args: dict[str, Any], api: WeeekAPI) -> Any:
     }
     if action == "create":
         return await api.create_time_entry(task_id, body)
-    _need(args, "weeek_manage_time_entry", action, "entry_id")
+
+    _need(args, tool, action, "entry_id")
+    if args.get("is_overtime") is None:
+        # The API requires the flag, so an update that omits it would reset it.
+        body["isOvertime"] = await _current_overtime(api, task_id, args["entry_id"])
     return await api.update_time_entry(task_id, args["entry_id"], body)
 
 
+async def _current_overtime(api: WeeekAPI, task_id: int, entry_id: Any) -> bool:
+    task = (await api.get_task(task_id)).get("task") or {}
+    for entry in task.get("timeEntries") or []:
+        if str(entry.get("id")) == str(entry_id):
+            return bool(entry.get("isOvertime"))
+    return False
+
+
 async def _handle_tags(args: dict[str, Any], api: WeeekAPI) -> Any:
-    action = args["action"]
+    tool, action = "weeek_manage_tags", args["action"]
     if action == "list":
         return await api.list_tags()
     if action == "create":
-        _need(args, "weeek_manage_tags", action, "title")
+        _need(args, tool, action, "title")
         return await api.create_tag(args["title"])
-    _need(args, "weeek_manage_tags", action, "tag_id")
+    if action not in ("update", "delete"):
+        raise _unknown_action(tool, action, "list", "create", "update", "delete")
+
+    _need(args, tool, action, "tag_id")
     if action == "delete":
         return await api.delete_tag(args["tag_id"])
-    _need(args, "weeek_manage_tags", action, "title", "color")
+    _need(args, tool, action, "title", "color")
     return await api.update_tag(args["tag_id"], {"title": args["title"], "color": args["color"]})
 
 
 async def _handle_projects(args: dict[str, Any], api: WeeekAPI) -> Any:
-    action = args["action"]
+    tool, action = "weeek_manage_projects", args["action"]
     if action == "create":
-        _need(args, "weeek_manage_projects", action, "name")
+        _need(args, tool, action, "name")
         return await api.create_project(
             {
                 "name": args["name"],
@@ -1156,49 +1184,63 @@ async def _handle_projects(args: dict[str, Any], api: WeeekAPI) -> Any:
                 "portfolioId": args.get("portfolio_id"),
             }
         )
-    _need(args, "weeek_manage_projects", action, "project_id")
+    if action not in ("update", "delete", "archive", "unarchive"):
+        raise _unknown_action(tool, action, "create", "update", "delete", "archive", "unarchive")
+
+    _need(args, tool, action, "project_id")
     if action == "delete":
         return await api.delete_project(args["project_id"])
     if action in ("archive", "unarchive"):
         return await api.archive_project(args["project_id"], archived=action == "archive")
     # color is optional in Weeek's spec but rejected as missing by the API (422).
-    _need(args, "weeek_manage_projects", action, "name", "color")
+    _need(args, tool, action, "name", "color")
+    is_private = args.get("is_private")
+    if is_private is None:
+        # The API requires the flag, so renaming a private project would publish it.
+        current = (await api.get_project(args["project_id"])).get("project") or {}
+        is_private = bool(current.get("isPrivate"))
     return await api.update_project(
         args["project_id"],
-        {"name": args["name"], "isPrivate": bool(args.get("is_private")), "color": args["color"]},
+        {"name": args["name"], "isPrivate": bool(is_private), "color": args["color"]},
     )
 
 
 async def _handle_boards(args: dict[str, Any], api: WeeekAPI) -> Any:
-    action = args["action"]
+    tool, action = "weeek_manage_boards", args["action"]
     if action == "create":
-        _need(args, "weeek_manage_boards", action, "name", "project_id")
+        _need(args, tool, action, "name", "project_id")
         return await api.create_board({"name": args["name"], "projectId": args["project_id"]})
-    _need(args, "weeek_manage_boards", action, "board_id")
+    if action not in ("update", "delete", "move"):
+        raise _unknown_action(tool, action, "create", "update", "delete", "move")
+
+    _need(args, tool, action, "board_id")
     if action == "delete":
         return await api.delete_board(args["board_id"])
     if action == "move":
         return await api.move_board(args["board_id"], args.get("upper_board_id"))
-    _need(args, "weeek_manage_boards", action, "name")
+    _need(args, tool, action, "name")
     return await api.update_board(args["board_id"], {"name": args["name"]})
 
 
 async def _handle_board_columns(args: dict[str, Any], api: WeeekAPI) -> Any:
-    action = args["action"]
+    tool, action = "weeek_manage_board_columns", args["action"]
     if action == "create":
-        _need(args, "weeek_manage_board_columns", action, "name", "board_id")
+        _need(args, tool, action, "name", "board_id")
         return await api.create_board_column({"name": args["name"], "boardId": args["board_id"]})
-    _need(args, "weeek_manage_board_columns", action, "board_column_id")
+    if action not in ("update", "delete", "move"):
+        raise _unknown_action(tool, action, "create", "update", "delete", "move")
+
+    _need(args, tool, action, "board_column_id")
     if action == "delete":
         return await api.delete_board_column(args["board_column_id"])
     if action == "move":
         return await api.move_board_column(args["board_column_id"], args.get("upper_board_column_id"))
-    _need(args, "weeek_manage_board_columns", action, "name")
+    _need(args, tool, action, "name")
     return await api.update_board_column(args["board_column_id"], {"name": args["name"]})
 
 
 async def _handle_portfolios(args: dict[str, Any], api: WeeekAPI) -> Any:
-    action = args["action"]
+    tool, action = "weeek_manage_portfolios", args["action"]
     if action == "list":
         return await api.list_portfolios(
             search=args.get("search"),
@@ -1207,34 +1249,52 @@ async def _handle_portfolios(args: dict[str, Any], api: WeeekAPI) -> Any:
             offset=args.get("offset"),
         )
     if action == "create":
-        _need(args, "weeek_manage_portfolios", action, "name")
+        _need(args, tool, action, "name")
         return await api.create_portfolio({"name": args["name"], "parentId": args.get("parent_id")})
-    _need(args, "weeek_manage_portfolios", action, "portfolio_id")
+    if action not in ("get", "update", "delete"):
+        raise _unknown_action(tool, action, "list", "get", "create", "update", "delete")
+
+    _need(args, tool, action, "portfolio_id")
     if action == "get":
         return await api.get_portfolio(args["portfolio_id"])
     if action == "delete":
         return await api.delete_portfolio(args["portfolio_id"])
-    _need(args, "weeek_manage_portfolios", action, "name")
+    _need(args, tool, action, "name")
     return await api.update_portfolio(args["portfolio_id"], {"name": args["name"]})
 
 
+_CUSTOM_FIELD_ACTIONS = (
+    "list_global",
+    "create",
+    "update",
+    "delete",
+    "transfer",
+    "create_option",
+    "update_option",
+    "delete_option",
+    "move_option",
+)
+
+
 async def _handle_custom_fields(args: dict[str, Any], api: WeeekAPI) -> Any:
-    action = args["action"]
+    tool, action = "weeek_manage_custom_fields", args["action"]
+    if action not in _CUSTOM_FIELD_ACTIONS:
+        raise _unknown_action(tool, action, *_CUSTOM_FIELD_ACTIONS)
     if action == "list_global":
         return await api.list_global_custom_fields()
 
     scope = args.get("scope", "global")
     scope_id = args.get("scope_id")
     if scope != "global" and scope_id is None:
-        raise ValueError(f"weeek_manage_custom_fields scope {scope!r} needs scope_id.")
+        raise ValueError(f"{tool} scope {scope!r} needs scope_id.")
 
     if action == "create":
-        _need(args, "weeek_manage_custom_fields", action, "type")
+        _need(args, tool, action, "type")
         return await api.create_custom_field(
             scope, scope_id, {"name": args.get("name"), "type": args["type"], "config": args.get("config")}
         )
 
-    _need(args, "weeek_manage_custom_fields", action, "field_id")
+    _need(args, tool, action, "field_id")
     field_id = args["field_id"]
     if action == "update":
         return await api.update_custom_field(
@@ -1243,26 +1303,29 @@ async def _handle_custom_fields(args: dict[str, Any], api: WeeekAPI) -> Any:
     if action == "delete":
         return await api.delete_custom_field(scope, scope_id, field_id)
     if action == "transfer":
-        _need(args, "weeek_manage_custom_fields", action, "target")
+        _need(args, tool, action, "target")
         target = args["target"]
         if target != "global" and args.get("target_id") is None:
-            raise ValueError("weeek_manage_custom_fields 'transfer' needs target_id for a project or board target.")
+            raise ValueError(f"{tool} 'transfer' needs target_id for a project or board target.")
         return await api.transfer_custom_field(scope, scope_id, field_id, target, args.get("target_id"))
     if action == "create_option":
-        _need(args, "weeek_manage_custom_fields", action, "name", "color")
+        _need(args, tool, action, "name", "color")
         return await api.create_custom_field_option(
             scope, scope_id, field_id, {"name": args["name"], "color": args["color"]}
         )
 
-    _need(args, "weeek_manage_custom_fields", action, "option_id")
+    _need(args, tool, action, "option_id")
     option_id = args["option_id"]
     if action == "update_option":
-        _need(args, "weeek_manage_custom_fields", action, "name", "color")
+        _need(args, tool, action, "name", "color")
         return await api.update_custom_field_option(
             scope, scope_id, field_id, option_id, {"name": args["name"], "color": args["color"]}
         )
     if action == "delete_option":
         return await api.delete_custom_field_option(scope, scope_id, field_id, option_id)
+    # The API takes after or before, and rejects a body with neither (422).
+    if args.get("after") is None and args.get("before") is None:
+        raise ValueError(f"{tool} 'move_option' needs after or before — the option id to sit next to.")
     return await api.move_custom_field_option(
         scope, scope_id, field_id, option_id, {"after": args.get("after"), "before": args.get("before")}
     )

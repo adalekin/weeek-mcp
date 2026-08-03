@@ -59,3 +59,12 @@ async def test_complete_task_no_content(api):
     respx.post(f"{BASE}/tm/tasks/1/complete").mock(return_value=httpx.Response(204))
     result = await api.complete_task(1)
     assert result == {"success": True}
+
+
+@respx.mock
+async def test_a_refusal_without_an_http_error_still_raises(api):
+    # A plan limit answers 200 with success:false and creates nothing.
+    respx.post(f"{BASE}/tm/projects").mock(return_value=httpx.Response(200, json={"success": False, "reason": "limit"}))
+    with pytest.raises(WeeekAPIError) as exc:
+        await api.create_project({"name": "P", "isPrivate": True})
+    assert exc.value.body["reason"] == "limit"

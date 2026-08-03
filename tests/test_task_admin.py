@@ -192,6 +192,92 @@ async def test_transfer_to_task_manager_takes_no_body():
     assert calls[0][:3] == ("POST", "/tm/projects/2/custom-fields/f1/transfer-to-task-manager", None)
 
 
+class StatefulAPI(RecordingAPI):
+    """Answers the reads the handlers do before a PUT, so carry-over can be tested."""
+
+    def __init__(self, project=None, time_entry=None):
+        super().__init__()
+        self._project = project or {}
+        self._time_entry = time_entry or {}
+
+    async def get_project(self, project_id):
+        self.calls.append(("GET", f"/tm/projects/{project_id}", None, None))
+        return {"success": True, "project": self._project}
+
+    async def get_task(self, task_id):
+        self.calls.append(("GET", f"/tm/tasks/{task_id}", None, None))
+        return {"success": True, "task": {"timeEntries": [self._time_entry]}}
+
+
+async def test_renaming_a_project_keeps_it_private():
+    api = StatefulAPI(project={"id": 3, "isPrivate": True})
+    await tools.handle_task_tool(
+        "weeek_manage_projects",
+        {"action": "update", "project_id": 3, "name": "Новое имя", "color": "#35AAFF"},
+        api,
+    )
+    put = [c for c in api.calls if c[0] == "PUT"][0]
+    assert put[2]["isPrivate"] is True
+
+
+async def test_an_explicit_privacy_change_still_wins():
+    api = StatefulAPI(project={"id": 3, "isPrivate": True})
+    await tools.handle_task_tool(
+        "weeek_manage_projects",
+        {"action": "update", "project_id": 3, "name": "N", "color": "#fff", "is_private": False},
+        api,
+    )
+    put = [c for c in api.calls if c[0] == "PUT"][0]
+    assert put[2]["isPrivate"] is False
+    assert not [c for c in api.calls if c[0] == "GET"]  # no needless read
+
+
+async def test_editing_a_time_entry_keeps_its_overtime_flag():
+    api = StatefulAPI(time_entry={"id": "e1", "duration": 30, "isOvertime": True})
+    await tools.handle_task_tool(
+        "weeek_manage_time_entry",
+        {"action": "update", "task_id": 5, "entry_id": "e1", "user_id": "u", "date": "2026-08-04", "duration": 45},
+        api,
+    )
+    put = [c for c in api.calls if c[0] == "PUT"][0]
+    assert put[2]["isOvertime"] is True
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("weeek_manage_tags", {"action": "rename", "tag_id": 1, "title": "x", "color": "#fff"}),
+        ("weeek_manage_projects", {"action": "rename", "project_id": 1, "name": "x", "color": "#fff"}),
+        ("weeek_manage_boards", {"action": "rename", "board_id": 1, "name": "x"}),
+        ("weeek_manage_board_columns", {"action": "rename", "board_column_id": 1, "name": "x"}),
+        ("weeek_manage_portfolios", {"action": "rename", "portfolio_id": 1, "name": "x"}),
+        ("weeek_manage_custom_fields", {"action": "reorder", "field_id": "f", "option_id": "o", "after": "z"}),
+        (
+            "weeek_manage_time_entry",
+            {"action": "log", "task_id": 1, "user_id": "u", "date": "2026-08-04", "duration": 5},
+        ),
+    ],
+)
+async def test_an_unknown_action_never_runs_a_neighbouring_one(tool, args):
+    # Every argument the neighbouring action needs is present, so only an explicit
+    # check stops "rename" from silently performing an update.
+    api = RecordingAPI()
+    with pytest.raises(ValueError, match="does not know action"):
+        await tools.handle_task_tool(tool, args, api)
+    assert api.calls == []
+
+
+async def test_move_option_without_a_neighbour_is_refused_before_the_request():
+    api = RecordingAPI()
+    with pytest.raises(ValueError, match="after or before"):
+        await tools.handle_task_tool(
+            "weeek_manage_custom_fields",
+            {"action": "move_option", "field_id": "f", "option_id": "o"},
+            api,
+        )
+    assert api.calls == []
+
+
 async def test_transfer_to_a_board_needs_the_target_id():
     with pytest.raises(ValueError, match="target_id"):
         await call(
