@@ -169,6 +169,14 @@ class WeeekKB:
         self._ws = str(workspaces[0]["id"])
         return self._ws
 
+    @property
+    def config(self) -> Config:
+        return self._cfg
+
+    async def workspace(self) -> str:
+        """The workspace these calls run against (auto-detected when not configured)."""
+        return await self._workspace()
+
     async def aclose(self) -> None:
         if self._client is not None:
             await self._client.aclose()

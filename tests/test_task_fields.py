@@ -87,6 +87,17 @@ def test_select_option_name_becomes_its_id():
     assert tools.resolve_custom_fields(FIELDS, {SELECT: EPIC}) == {SELECT: EPIC}
 
 
+def test_multiselect_takes_a_list_of_options():
+    # Weeek's spec: select -> one option id, multiselect -> a list of them.
+    resolved = tools.resolve_custom_fields(FIELDS, {SELECT: ["Эпик", EPIC]})
+    assert resolved == {SELECT: [EPIC, EPIC]}
+
+
+def test_unknown_option_in_a_list_is_reported():
+    with pytest.raises(ValueError, match="Эпик"):
+        tools.resolve_custom_fields(FIELDS, {SELECT: ["Эпик", "Багфикс"]})
+
+
 def test_unknown_option_lists_the_options():
     with pytest.raises(ValueError, match="Эпик"):
         tools.resolve_custom_fields(FIELDS, {SELECT: "Багфикс"})
@@ -183,6 +194,17 @@ async def test_create_task_survives_a_response_without_the_task():
         {"title": "T", "project_id": 1, "custom_fields": {LINK: "https://x"}},
         Terse(),
     )
+
+
+@pytest.mark.parametrize("empty", [None, "", []])
+def test_every_way_of_asking_for_an_empty_field_counts_as_a_clear(empty):
+    # Weeek stores all of them as null, so none of them is a lost write.
+    assert tools.dropped_custom_fields(_stored({}), {LINK: empty}) == []
+
+
+@pytest.mark.parametrize("falsy", [0, False])
+def test_zero_and_false_are_real_values_not_clears(falsy):
+    assert tools.dropped_custom_fields(_stored({}), {LINK: falsy}) == [LINK]
 
 
 async def test_clearing_a_field_is_not_mistaken_for_a_dropped_write():

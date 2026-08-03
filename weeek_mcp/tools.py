@@ -18,12 +18,15 @@ asked for, so a dropped value surfaces as an error instead of a silent no-op.
 
 from __future__ import annotations
 
+import html
 import re
 from typing import Any
 
 import mcp.types as types
 
 from .kb.client import KBDocument, WeeekKB
+from .kb.prosemirror import markdown_to_html
+from .kb.session import replace_task_description
 from .weeek_api import WeeekAPI
 
 KB_URI_SCHEME = "weeek-kb"
@@ -91,9 +94,23 @@ def _unknown_field_message(key: Any, fields: list[dict[str, Any]]) -> str:
 
 
 def _custom_field_value(field: dict[str, Any], value: Any) -> Any:
-    """Select fields are written by option id, so map a chosen option name onto it."""
+    """Map chosen option names onto option ids, which is what Weeek stores.
+
+    Per Weeek's spec a ``select`` takes one option id and a ``multiselect`` takes a
+    list of them, so a list is resolved element by element.
+    """
     options = field.get("options") or []
-    if not options or not isinstance(value, str):
+    if not options or value is None:
+        return value
+    if isinstance(value, list):
+        return [_option_id(field, options, v) for v in value]
+    if not isinstance(value, str):
+        return value
+    return _option_id(field, options, value)
+
+
+def _option_id(field: dict[str, Any], options: list[dict[str, Any]], value: Any) -> Any:
+    if not isinstance(value, str):
         return value
     for option in options:
         if option.get("id") == value:
@@ -128,8 +145,19 @@ def dropped_custom_fields(
     applied = {f.get("id"): f.get("value") for f in stored}
     labels = {f.get("id"): str(f.get("name") or f.get("id")) for f in fields or []}
     return [
-        labels.get(fid, str(fid)) for fid, value in requested.items() if value is not None and applied.get(fid) is None
+        labels.get(fid, str(fid))
+        for fid, value in requested.items()
+        if not _clears_field(value) and applied.get(fid) is None
     ]
+
+
+def _clears_field(value: Any) -> bool:
+    """Values that ask for an empty field — Weeek stores them all as null.
+
+    Compared by equality rather than truthiness so that 0 and False, which are real
+    values for number and boolean fields, are not mistaken for a clear.
+    """
+    return value is None or value == "" or value == []
 
 
 _FIELD_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
@@ -261,7 +289,14 @@ TASK_TOOLS: list[types.Tool] = [
                     "type": ["integer", "null"],
                     "description": "Target column; null puts the task in the board default.",
                 },
-                "description": {"type": "string"},
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "Task description as HTML, which is what Weeek's create endpoint "
+                        "stores. weeek_update_task takes Markdown instead, because it writes "
+                        "through the editor rather than REST."
+                    ),
+                },
                 "type": {"type": "string", "enum": ["action", "meet", "call"]},
                 "priority": PRIORITY_SCHEMA,
                 "custom_fields": {
@@ -283,13 +318,23 @@ TASK_TOOLS: list[types.Tool] = [
     types.Tool(
         name="weeek_update_task",
         description=(
-            "Update a task's fields (title, priority, type, dates, duration, tags) and its custom field values."
+            "Update a task's fields (title, priority, type, dates, duration, tags), its "
+            "custom field values, and its description."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "task_id": {"type": "integer"},
                 "title": {"type": "string"},
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "Replaces the description, as Markdown (same feature set as "
+                        "weeek_kb_update); an empty string clears it. Weeek's REST API "
+                        "ignores the description on update, so this drives its editor in a "
+                        "headless browser (a few seconds) and needs the knowledge base session."
+                    ),
+                },
                 "priority": PRIORITY_SCHEMA,
                 "type": {"type": "string", "enum": ["action", "meet", "call"]},
                 "start_date": {"type": "string", "description": "Y-m-d"},
@@ -303,9 +348,10 @@ TASK_TOOLS: list[types.Tool] = [
                     "description": (
                         "Custom field values keyed by field name or field id, e.g. "
                         '{"Ссылка на фичу": "https://..."}. For a select field pass the '
-                        "option name or its id; pass null to clear a field. Names are "
-                        "matched against this task's own fields, and a field that does not "
-                        "belong to this task's project is reported as an error."
+                        "option name or its id, for a multiselect a list of them; pass null "
+                        "to clear a field. Names are matched against this task's own fields, "
+                        "and a field that does not belong to this task's project is reported "
+                        "as an error."
                     ),
                 },
             },
@@ -551,7 +597,53 @@ ALL_TOOLS = TASK_TOOLS + KB_TOOLS
 
 
 # --------------------------------------------------------------------------- handlers
-async def handle_task_tool(name: str, args: dict[str, Any], api: WeeekAPI) -> Any:
+_TAGS = re.compile(r"<[^>]+>")
+
+
+def _text_of(markup: str) -> str:
+    """Tag- and whitespace-free text, for comparing what we asked for with what stuck.
+
+    Unescape first, then strip tags: Weeek hands descriptions back with the user's
+    own ``<`` and ``&`` unescaped inside the markup, so text like ``a < b`` makes it
+    invalid HTML. Normalizing both sides the same way keeps such a description
+    comparable instead of reading as a failed edit.
+    """
+    return "".join(_TAGS.sub(" ", html.unescape(markup)).split())
+
+
+def check_description_applied(task_response: Any, requested: str) -> None:
+    """Confirm the edit reached the server — it syncs over a websocket, not the REST call."""
+    stored = ((task_response or {}).get("task") or {}).get("description")
+    if stored is None:
+        return  # nothing echoed back to compare against
+    if _text_of(stored) != _text_of(requested):
+        raise ValueError(
+            "The description was not stored as requested — Weeek now has "
+            f"{_text_of(stored)[:80]!r}. The editor syncs over a websocket, so a slow "
+            "connection can drop the edit; retry the same call."
+        )
+
+
+async def _write_description(kb: WeeekKB | None, task_id: int, markdown: str) -> str:
+    """Set a task's description through Weeek's editor — REST cannot write it.
+
+    Returns the HTML handed to the editor, which is what the result has to match.
+    Markdown goes through the KB converter so that text like ``a < b & c`` is
+    escaped: pasted raw, the browser would parse it as markup and drop it.
+    """
+    if kb is None:
+        raise ValueError(
+            "Updating a description needs the knowledge base session (Playwright): Weeek's "
+            "REST API ignores the description on update. Set WEEEK_EMAIL/WEEEK_PASSWORD or "
+            "run `weeek-mcp-login`, or recreate the task with weeek_create_task, which can "
+            "set a description."
+        )
+    body = markdown_to_html(markdown) if markdown.strip() else ""
+    await replace_task_description(kb.config, await kb.workspace(), str(task_id), body)
+    return body
+
+
+async def handle_task_tool(name: str, args: dict[str, Any], api: WeeekAPI, kb: WeeekKB | None = None) -> Any:
     if name == "weeek_whoami":
         return await api.whoami()
     if name == "weeek_list_members":
@@ -631,14 +723,16 @@ async def handle_task_tool(name: str, args: dict[str, Any], api: WeeekAPI) -> An
             "duration": args.get("duration"),
             "tags": args.get("tags"),
         }
-        if not args.get("custom_fields"):
-            return await api.update_task(args["task_id"], body)
+        task_fields: list[dict[str, Any]] = []
+        requested: dict[str, Any] = {}
+        if args.get("custom_fields"):
+            task_fields = await task_custom_fields(api, args["task_id"])
+            requested = resolve_custom_fields(task_fields, args["custom_fields"])
+            body["customFields"] = requested
 
-        fields = await task_custom_fields(api, args["task_id"])
-        requested = resolve_custom_fields(fields, args["custom_fields"])
-        body["customFields"] = requested
         updated = await api.update_task(args["task_id"], body)
-        dropped = dropped_custom_fields(updated, requested, fields)
+
+        dropped = dropped_custom_fields(updated, requested, task_fields) if requested else []
         if dropped:
             raise ValueError(
                 "Weeek did not store "
@@ -646,6 +740,10 @@ async def handle_task_tool(name: str, args: dict[str, Any], api: WeeekAPI) -> An
                 + " — a custom field only applies to the projects it was added to. Any other "
                 "values in the same call were saved."
             )
+        if args.get("description") is not None:
+            written = await _write_description(kb, args["task_id"], args["description"])
+            updated = await api.get_task(args["task_id"])  # the REST response predates the edit
+            check_description_applied(updated, written)
         return updated
     if name == "weeek_complete_task":
         return await api.complete_task(args["task_id"])

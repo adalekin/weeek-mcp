@@ -80,7 +80,10 @@ class WeeekServer:
             self._log(f"{name}: start")
             try:
                 if name in TASK_TOOL_NAMES:
-                    result = await handle_task_tool(name, args, self._get_api())
+                    # Task descriptions are only writable through the browser session,
+                    # so the KB client rides along when one is available.
+                    kb = self._get_kb() if self.kb_available else None
+                    result = await handle_task_tool(name, args, self._get_api(), kb)
                 elif name in KB_TOOL_NAMES:
                     result = await handle_kb_tool(name, args, self._get_kb())
                 else:

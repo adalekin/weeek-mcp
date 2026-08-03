@@ -100,6 +100,14 @@ name or id), on `weeek_create_task` by id only — `weeek_list_custom_fields` li
 them. A field belongs to the projects it was added to, and Weeek stores nothing
 when you write to one it doesn't cover, so the write is verified and reported.
 
+Descriptions are editable on an existing task: `weeek_update_task` takes
+`description` as Markdown (empty string clears it). Weeek's REST API only accepts a
+description on create — `PUT /tm/tasks/{id}` has no such field — because
+descriptions sync through the same collaborative editor as KB document bodies, so
+this drives that editor headlessly and needs the knowledge base session (a few
+seconds per task). `weeek_create_task` still takes its `description` as HTML, which
+is what that endpoint stores.
+
 **Knowledge base:** `weeek_kb_search`, `weeek_kb_list`, `weeek_kb_read`,
 `weeek_kb_create`, `weeek_kb_update`, `weeek_kb_icons`, `weeek_kb_delete`.
 

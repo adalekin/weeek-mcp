@@ -1,8 +1,14 @@
-"""Weeek web login via Playwright — used only to (re)acquire the session cookies
-that the internal KB API needs. Knowledge base data itself is fetched with httpx.
+"""Weeek's browser channel: login via Playwright, plus the collaborative editors.
 
-Weeek's login is a two-step flow: enter email -> Continue -> enter password -> submit.
-The saved storageState (cookies) is then reused by the httpx client.
+Login runs only to (re)acquire the session cookies the internal KB API needs —
+data itself is fetched with httpx. Weeek's login is a two-step flow: enter email
+-> Continue -> enter password -> submit. The saved storageState (cookies) is then
+reused by the httpx client.
+
+The editors are here for the same reason: KB document bodies and task descriptions
+are not writable over REST at all, so they are edited by driving Weeek's own UI.
+Task descriptions live in the task-manager domain rather than the knowledge base,
+but they share this transport, so both live in this module.
 """
 
 from __future__ import annotations
@@ -123,9 +129,27 @@ async def _automated_login(cfg: Config) -> None:
             await browser.close()
 
 
-_EDITOR_SELECTOR = ".ProseMirror, [contenteditable='true']"
-_PASTE_JS = """(html) => {
-    const el = document.querySelector(".ProseMirror") || document.querySelector("[contenteditable='true']");
+_KB_EDITOR = ".ProseMirror, [contenteditable='true']"  # a KB page has exactly one editor
+# A task page has two: the description and the comment box below it. Anchor on the
+# description wrapper — picking "the first one" would one day clear a comment.
+_TASK_DESCRIPTION_EDITOR = ".description .ProseMirror"
+
+# Select-all via the Selection API rather than a keyboard shortcut: on macOS
+# Control+A is "move to line start" inside ProseMirror, which quietly turns the
+# following Delete into a one-character edit.
+_SELECT_ALL_JS = """(selector) => {
+    const el = document.querySelector(selector);
+    if (!el) return false;
+    el.focus();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return true;
+}"""
+_PASTE_JS = """({selector, html}) => {
+    const el = document.querySelector(selector);
     if (!el) return false;
     el.focus();
     const dt = new DataTransfer();
@@ -137,24 +161,48 @@ _PASTE_JS = """(html) => {
 
 
 async def replace_article_content(cfg: Config, workspace_id: str, article_id: str, html: str) -> None:
-    """Replace a KB article's body in place by driving Weeek's own editor.
+    """Replace a KB article's body in place by driving Weeek's own editor."""
+    await _replace_editor_content(
+        cfg, f"/ws/{workspace_id}/kb/{article_id}", html, what="document body", selector=_KB_EDITOR
+    )
+
+
+async def replace_task_description(cfg: Config, workspace_id: str, task_id: str, html: str) -> None:
+    """Replace a task's description in place by driving Weeek's own editor.
+
+    ``PUT /tm/tasks/{id}`` has no description field (confirmed against Weeek's
+    OpenAPI spec — only create does), because descriptions sync through the same
+    collaborative channel as KB bodies. Empty html clears the description.
+    """
+    await _replace_editor_content(
+        cfg,
+        f"/ws/{workspace_id}/task/{task_id}",
+        html,
+        what="task description",
+        selector=_TASK_DESCRIPTION_EDITOR,
+    )
+
+
+async def _replace_editor_content(cfg: Config, page_path: str, html: str, *, what: str, selector: str) -> None:
+    """Drive one of Weeek's collaborative editors to hold exactly ``html``.
 
     Bounded by ``_EDIT_TIMEOUT`` so a stuck browser/editor fails with a clear error
     instead of hanging past the MCP client's own tool-call timeout untraced.
     """
     t0 = time.monotonic()
     try:
-        await asyncio.wait_for(_replace_article_content(cfg, workspace_id, article_id, html), timeout=_EDIT_TIMEOUT)
+        await asyncio.wait_for(_edit(cfg, page_path, html, what, selector), timeout=_EDIT_TIMEOUT)
     except TimeoutError as exc:
-        raise KBAuthError(f"Content edit timed out after {_EDIT_TIMEOUT:.0f}s (stuck at {time.monotonic() - t0:.1f}s in).") from exc
+        raise KBAuthError(
+            f"Editing the {what} timed out after {_EDIT_TIMEOUT:.0f}s (stuck at {time.monotonic() - t0:.1f}s in)."
+        ) from exc
 
 
-async def _replace_article_content(cfg: Config, workspace_id: str, article_id: str, html: str) -> None:
-    """Replace a KB article's body in place by driving Weeek's own editor.
+async def _edit(cfg: Config, page_path: str, html: str, what: str, selector: str) -> None:
+    """Open the page headlessly, clear the editor ``selector`` points at, paste new HTML.
 
-    Weeek persists document bodies through a collaborative websocket, not REST, so
-    we open the document headlessly, clear it, and paste new HTML (which ProseMirror
-    parses into its schema and syncs to the server). The document id is preserved.
+    Weeek persists these bodies through a collaborative websocket, not REST, so
+    ProseMirror has to parse the HTML and sync it itself. Ids are preserved.
     """
     from playwright.async_api import async_playwright
 
@@ -168,28 +216,28 @@ async def _replace_article_content(cfg: Config, workspace_id: str, article_id: s
         context = await browser.new_context(storage_state=str(cfg.storage_state_path))
         page = await context.new_page()
         try:
-            await page.goto(f"{cfg.app_base}/ws/{workspace_id}/kb/{article_id}", wait_until="domcontentloaded", timeout=15000)
+            await page.goto(cfg.app_base + page_path, wait_until="domcontentloaded", timeout=15000)
             if "/login" in page.url or "/welcome" in page.url:
                 raise KBAuthError("Session expired. Run `weeek-mcp-login` to refresh.")
             # Wait for the editor and its collaborative websocket to connect.
-            editor = await page.wait_for_selector(_EDITOR_SELECTOR, timeout=20000)
-            log(f"kb edit: editor ready in {time.monotonic() - t0:.1f}s")
+            editor = await page.wait_for_selector(selector, timeout=20000)
+            log(f"edit {what}: editor ready in {time.monotonic() - t0:.1f}s")
             await page.wait_for_timeout(5000)
             if editor is None:
-                raise KBAuthError("Could not locate the document editor.")
+                raise KBAuthError(f"Could not locate the editor for the {what}.")
             await editor.click()
             await page.wait_for_timeout(200)
-            # Select-all + delete (Mod-A is Meta on macOS, Control elsewhere).
-            await page.keyboard.press("Meta+A")
-            await page.keyboard.press("Control+A")
+            if not await page.evaluate(_SELECT_ALL_JS, selector):
+                raise KBAuthError(f"Could not locate the editor for the {what}.")
             await page.keyboard.press("Delete")
             await page.wait_for_timeout(300)
 
-            ok = await page.evaluate(_PASTE_JS, html)
-            if not ok:
-                raise KBAuthError("Could not locate the document editor.")
+            if html.strip():
+                ok = await page.evaluate(_PASTE_JS, {"selector": selector, "html": html})
+                if not ok:
+                    raise KBAuthError(f"Could not locate the editor for the {what}.")
             # Give the collaborative sync time to persist server-side.
             await page.wait_for_timeout(5000)
-            log(f"kb edit: done in {time.monotonic() - t0:.1f}s")
+            log(f"edit {what}: done in {time.monotonic() - t0:.1f}s")
         finally:
             await browser.close()
