@@ -231,7 +231,9 @@ def _inline_nodes(text: str) -> list[dict]:
         elif part.startswith("["):
             m = _LINK_RE.match(part)
             if m:
-                nodes.append({"type": "text", "text": m.group(1), "marks": [{"type": "link", "attrs": {"href": m.group(2)}}]})
+                nodes.append(
+                    {"type": "text", "text": m.group(1), "marks": [{"type": "link", "attrs": {"href": m.group(2)}}]}
+                )
             else:
                 nodes.append({"type": "text", "text": part})
         elif (part.startswith("*") and part.endswith("*") and len(part) > 2) or (
@@ -371,7 +373,15 @@ def markdown_to_doc(md: str) -> dict:
                 }
                 for row in rows
             ]
-            content.append({"type": "table", "content": [{"type": "table_body", "content": table_rows}]})
+            # The table_html wrapper is not decorative: a table whose body is not
+            # wrapped in it is dropped wholesale the first time Weeek's editor
+            # opens the document, taking the rows with it.
+            content.append(
+                {
+                    "type": "table",
+                    "content": [{"type": "table_html", "content": [{"type": "table_body", "content": table_rows}]}],
+                }
+            )
             continue
 
         mi = _IMAGE_RE.match(stripped)

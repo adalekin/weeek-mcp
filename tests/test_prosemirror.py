@@ -177,7 +177,11 @@ def test_markdown_to_doc_nested_list():
 def test_markdown_to_doc_table():
     md = "| A | B |\n| --- | --- |\n| 1 | 2 |"
     doc = markdown_to_doc(md)
-    assert doc["content"][0]["type"] == "table"
+    table = doc["content"][0]
+    assert table["type"] == "table"
+    # Weeek's editor drops a table whose body is not wrapped in table_html.
+    assert [n["type"] for n in table["content"]] == ["table_html"]
+    assert [n["type"] for n in table["content"][0]["content"]] == ["table_body"]
     assert to_markdown(doc) == md
 
 
