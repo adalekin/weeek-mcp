@@ -429,7 +429,14 @@ class WeeekKB:
         before = read_tables(await self._document_content(doc_id))
         after = read_tables(markdown_to_doc(markdown))
         plan = carry_over_plan(before, after) if after else None
-        await replace_article_content(self._cfg, ws, str(doc_id), markdown_to_html(markdown), columns_plan=plan)
+        await replace_article_content(
+            self._cfg,
+            ws,
+            str(doc_id),
+            markdown_to_html(markdown),
+            columns_plan=plan,
+            tables_present=bool(before or after),
+        )
 
     async def set_table_widths(
         self,

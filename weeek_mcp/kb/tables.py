@@ -21,6 +21,7 @@ import uuid
 from dataclasses import dataclass
 
 MIN_WIDTH = 90  # the editor's own floor, enforced in its mousemove handler
+DEFAULT_COLUMN_WIDTH = 180  # what the editor gives a column it was never told about
 FALLBACK_CONTENT_WIDTH = 676  # the KB content column is a fixed 680px, less 2px padding either side
 
 

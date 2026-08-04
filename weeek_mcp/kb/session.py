@@ -236,7 +236,7 @@ _REPLACE_CONTENT_JS = (
 # They have to be set the way the editor's own resizer sets them: a transaction
 # on the live EditorView, which then syncs over the collaborative websocket.
 _APPLY_COLUMNS_JS = (
-    """({selector, plan, minWidth, fallbackWidth}) => {"""
+    """({selector, plan, minWidth, defaultWidth, fallbackWidth}) => {"""
     + _FIND_EDITOR_JS
     + """
     const editor = findEditor(selector);
@@ -283,7 +283,7 @@ _APPLY_COLUMNS_JS = (
         try { prev = entry.node.attrs.columns ? JSON.parse(entry.node.attrs.columns) : []; } catch (e) { prev = []; }
         const columns = Array.from({length: n}, (_, k) => {
             const old = prev[k] || {};
-            const w = widths[k] == null ? (old.width || fallbackWidth) : widths[k];
+            const w = widths[k] == null ? (old.width || defaultWidth) : widths[k];
             return {
                 id: old.id || crypto.randomUUID(),
                 width: Math.max(minWidth, Math.round(w)),
@@ -307,11 +307,14 @@ async def replace_article_content(
     article_id: str,
     html: str,
     columns_plan: list[dict | None] | None = None,
+    tables_present: bool = False,
 ) -> None:
     """Replace a KB article's body in place by driving Weeek's own editor.
 
-    ``columns_plan`` restores table column widths right after the paste, in the
-    same browser session — pasted markup always lands with default widths.
+    ``columns_plan`` restores table column widths right after the replacement, in
+    the same browser session — new markup always lands with default widths.
+    ``tables_present`` says the document holds tables either before or after, which
+    rules out the clipboard fallback.
     """
     await _replace_editor_content(
         cfg,
@@ -320,6 +323,7 @@ async def replace_article_content(
         what="document body",
         selector=_KB_EDITOR,
         columns_plan=columns_plan,
+        tables_present=tables_present,
     )
 
 
@@ -360,6 +364,7 @@ async def _replace_editor_content(
     what: str,
     selector: str,
     columns_plan: list[dict | None] | None = None,
+    tables_present: bool = False,
 ) -> None:
     """Drive one of Weeek's collaborative editors to hold exactly ``html``.
 
@@ -368,7 +373,9 @@ async def _replace_editor_content(
     """
     t0 = time.monotonic()
     try:
-        await asyncio.wait_for(_edit(cfg, page_path, html, what, selector, columns_plan), timeout=_EDIT_TIMEOUT)
+        await asyncio.wait_for(
+            _edit(cfg, page_path, html, what, selector, columns_plan, tables_present), timeout=_EDIT_TIMEOUT
+        )
     except TimeoutError as exc:
         raise KBAuthError(
             f"Editing the {what} timed out after {_EDIT_TIMEOUT:.0f}s (stuck at {time.monotonic() - t0:.1f}s in)."
@@ -387,11 +394,17 @@ async def _clipboard_replace(page, selector: str, html: str, what: str) -> None:
 
 async def _apply_columns(page, plan: list[dict | None], selector: str = _KB_EDITOR) -> dict:
     """Run the width transaction and let the collaborative sync carry it server-side."""
-    from .tables import FALLBACK_CONTENT_WIDTH, MIN_WIDTH
+    from .tables import DEFAULT_COLUMN_WIDTH, FALLBACK_CONTENT_WIDTH, MIN_WIDTH
 
     result: dict = await page.evaluate(
         _APPLY_COLUMNS_JS,
-        {"selector": selector, "plan": plan, "minWidth": MIN_WIDTH, "fallbackWidth": FALLBACK_CONTENT_WIDTH},
+        {
+            "selector": selector,
+            "plan": plan,
+            "minWidth": MIN_WIDTH,
+            "defaultWidth": DEFAULT_COLUMN_WIDTH,
+            "fallbackWidth": FALLBACK_CONTENT_WIDTH,
+        },
     )
     if not result.get("ok"):
         raise KBAuthError(f"Could not set table widths: {result.get('error', 'unknown reason')}.")
@@ -432,6 +445,7 @@ async def _edit(
     what: str,
     selector: str,
     columns_plan: list[dict | None] | None = None,
+    tables_present: bool = False,
 ) -> None:
     """Open the page headlessly and make the editor ``selector`` points at hold ``html``.
 
@@ -467,6 +481,14 @@ async def _edit(
 
             replaced = await page.evaluate(_REPLACE_CONTENT_JS, {"selector": selector, "html": html.strip()})
             if not replaced.get("ok"):
+                if tables_present or "<table" in html.lower():
+                    # The clipboard route cannot clear a table, so it would leave the old
+                    # one sitting next to the new content. Refusing beats writing that.
+                    raise KBAuthError(
+                        f"Could not reach Weeek's editor to replace the {what} "
+                        f"({replaced.get('error', 'unknown reason')}), and the fallback route "
+                        "cannot replace tables without duplicating them, so nothing was written."
+                    )
                 log(f"edit {what}: transaction route unavailable ({replaced.get('error')}), using the clipboard")
                 await _clipboard_replace(page, selector, html, what)
             # Give the collaborative sync time to persist server-side.
