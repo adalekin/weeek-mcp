@@ -40,7 +40,8 @@ import httpx
 from ..config import Config
 from ..logging_util import make_logger
 from .prosemirror import markdown_to_doc, markdown_to_html, to_markdown
-from .session import KBAuthError, automated_login, load_cookies_into, replace_article_content
+from .session import KBAuthError, automated_login, load_cookies_into, replace_article_content, set_table_columns
+from .tables import carry_over_plan, read_tables, size_new_tables, widths_plan
 
 _PAGE_LIMIT = 200
 
@@ -378,7 +379,7 @@ class WeeekKB:
         # not leave a stray document behind for the caller to notice and clean up.
         avatar = await self._resolve_icon(icon) if icon else None
 
-        body: dict = {"name": title, "content": markdown_to_doc(markdown) if markdown else {}}
+        body: dict = {"name": title, "content": size_new_tables(markdown_to_doc(markdown)) if markdown else {}}
         data = await self._post(f"/ws/{ws}/kb/articles", body)
         art = data.get("article") or {}
         doc_id = str(art.get("id"))
@@ -404,13 +405,54 @@ class WeeekKB:
         await self._set_parent(doc_id, parent_id)
         self._invalidate_cache()
 
+    async def _document_content(self, doc_id: str) -> dict:
+        """The raw ProseMirror document behind an article."""
+        ws = await self._workspace()
+        data = await self._get(f"/ws/{ws}/kb/articles/{doc_id}")
+        article = data.get("article")
+        if not article:
+            raise KBError(f"Document {doc_id!r} not found.")
+        return (article.get("content") or {}).get("data") or {}
+
     async def update_content(self, doc_id: str, markdown: str) -> None:
-        """Replace a document's body in place via Weeek's editor (collaborative sync)."""
+        """Replace a document's body in place via Weeek's editor (collaborative sync).
+
+        Column widths do not survive the paste — the editor's table_body spec
+        parses a plain ``tbody`` and drops them — so they are read first and put
+        back in the same browser session. Tables whose shape changed, and new
+        ones, are fitted to the content column instead.
+        """
         ws = await self._workspace()
         # Ensure we have a live session before launching the browser editor.
         if not self._cfg.storage_state_path.exists():
             await self._refresh_session()
-        await replace_article_content(self._cfg, ws, str(doc_id), markdown_to_html(markdown))
+        before = read_tables(await self._document_content(doc_id))
+        after = read_tables(markdown_to_doc(markdown))
+        plan = carry_over_plan(before, after) if after else None
+        await replace_article_content(self._cfg, ws, str(doc_id), markdown_to_html(markdown), columns_plan=plan)
+
+    async def set_table_widths(
+        self,
+        doc_id: str,
+        *,
+        table_index: int | None = None,
+        widths: list[int | None] | None = None,
+        fit: bool = False,
+    ) -> dict:
+        """Set column widths on a document's tables, leaving their content alone."""
+        ws = await self._workspace()
+        if not self._cfg.storage_state_path.exists():
+            await self._refresh_session()
+        tables = read_tables(await self._document_content(doc_id))
+        plan = widths_plan(tables, table_index, widths, fit=fit)
+        result = await set_table_columns(self._cfg, ws, str(doc_id), plan)
+        applied = read_tables(await self._document_content(doc_id))
+        return {
+            "tables": len(applied),
+            "changed": result.get("changed", 0),
+            "content_width": result.get("available"),
+            "widths": [t.widths for t in applied],
+        }
 
     async def export_documents(self, target_dir: str, *, query: str = "") -> dict:
         """Write knowledge base documents to a local folder as Markdown files.

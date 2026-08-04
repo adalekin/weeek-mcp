@@ -119,11 +119,19 @@ seconds per task). `weeek_create_task` still takes its `description` as HTML, wh
 is what that endpoint stores.
 
 **Knowledge base:** `weeek_kb_search`, `weeek_kb_list`, `weeek_kb_read`,
-`weeek_kb_create`, `weeek_kb_update`, `weeek_kb_icons`, `weeek_kb_delete`.
+`weeek_kb_create`, `weeek_kb_update`, `weeek_kb_table_widths`, `weeek_kb_icons`,
+`weeek_kb_delete`.
 
 > `weeek_kb_update` with new content launches a short headless browser session (a few
 > seconds) to drive Weeek's editor, because document bodies are saved over a
 > collaborative websocket rather than REST. The document id is preserved.
+
+Tables have one size to set: the pixel width of each column (minimum 90). New tables
+are fitted to the document's content column (~676px) instead of Weeek's 180px-per-column
+default, and existing widths are carried across a `weeek_kb_update` — a table that gains
+or loses a column is re-fitted. `weeek_kb_table_widths` sets them explicitly:
+`widths: [300, 200, 176]` for exact sizes, or `fit: true` to spread a table across the
+content column.
 
 Documents can carry an icon: pass `icon` to `weeek_kb_create`/`weeek_kb_update` as a
 single emoji (`🚀`) or as one of Weeek's built-in icon names (`weeek_kb_icons` lists
@@ -153,9 +161,14 @@ content**, not a link.
 - Document content is ProseMirror/TipTap JSON, converted to/from Markdown by
   [`weeek_mcp/kb/prosemirror.py`](weeek_mcp/kb/prosemirror.py). Editing an existing body
   goes through Weeek's collaborative editor (there is no REST content-write), so
-  `weeek_kb_update` opens the document in a headless browser and pastes the new content.
-  Authoring covers the common Markdown subset (headings, paragraphs, lists, bold/inline
-  code, code blocks, quotes, rules); rich cases like nested lists and tables are simplified.
+  `weeek_kb_update` opens the document in a headless browser and replaces the content
+  there. Authoring covers the common Markdown subset (headings, paragraphs, lists,
+  bold/inline code, code blocks, quotes, rules); rich cases like nested lists and tables
+  are simplified.
+- Table column widths live on the `table_body` node and are ignored by the editor's HTML
+  parser, so they are re-applied as an editor transaction after the content is replaced
+  ([`weeek_mcp/kb/tables.py`](weeek_mcp/kb/tables.py)). Cell colors and per-column colors
+  are stored alongside the widths but are not exposed as tools yet.
 
 ## Development
 

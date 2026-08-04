@@ -842,6 +842,46 @@ KB_TOOLS: list[types.Tool] = [
         },
     ),
     types.Tool(
+        name="weeek_kb_table_widths",
+        description=(
+            "Resize the columns of a table in a knowledge base document. Weeek stores "
+            "column widths in pixels (minimum 90) and nothing else — there is no row "
+            "height or table width to set. Pass widths for exact sizes, or fit=true to "
+            "spread the table across the document's content column (~676px), which is "
+            "the usual intent for a table that looks too narrow. Tables are addressed "
+            "by their order in the document, starting at 0; omitting table_index with "
+            "fit=true resizes every table. Drives Weeek's editor in a headless browser "
+            "(a few seconds), leaving the document's content untouched."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "doc_id": {"type": "string"},
+                "table_index": {
+                    "type": "integer",
+                    "description": (
+                        "Which table to resize, in document order (0 = first). Required "
+                        "with widths; omit with fit=true to resize every table."
+                    ),
+                },
+                "widths": {
+                    "type": "array",
+                    "items": {"type": ["integer", "null"]},
+                    "description": (
+                        "One width in pixels per column, in column order; minimum 90. "
+                        "null leaves that column as it is. The list length must match "
+                        "the table's column count."
+                    ),
+                },
+                "fit": {
+                    "type": "boolean",
+                    "description": "Spread the columns evenly across the content column instead of giving widths.",
+                },
+            },
+            "required": ["doc_id"],
+        },
+    ),
+    types.Tool(
         name="weeek_kb_icons",
         description=(
             "List the built-in icon names accepted by the icon argument of "
@@ -1368,6 +1408,14 @@ async def handle_kb_tool(name: str, args: dict[str, Any], kb: WeeekKB) -> Any:
         if not actions:
             raise ValueError("weeek_kb_update needs title, content_markdown and/or icon.")
         return {"id": args["doc_id"], "updated": actions}
+    if name == "weeek_kb_table_widths":
+        result = await kb.set_table_widths(
+            args["doc_id"],
+            table_index=args.get("table_index"),
+            widths=args.get("widths"),
+            fit=bool(args.get("fit")),
+        )
+        return {"id": args["doc_id"], **result}
     if name == "weeek_kb_move":
         await kb.move_document(args["doc_id"], args["parent_id"])
         return {"id": args["doc_id"], "parent_id": args["parent_id"], "moved": True}

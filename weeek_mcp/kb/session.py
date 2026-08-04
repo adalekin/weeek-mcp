@@ -21,7 +21,7 @@ from ..config import Config
 from ..logging_util import make_logger
 
 _LOGIN_TIMEOUT = 45.0  # hard ceiling so a stuck browser fails loudly instead of hanging
-_EDIT_TIMEOUT = 45.0
+_EDIT_TIMEOUT = 60.0  # a paste that also restores table widths waits on two syncs
 
 LOGIN_PATH = "/login"  # redirects to /welcome
 EMAIL_INPUT = "input[type='email'], input[name='email']"
@@ -65,7 +65,9 @@ async def automated_login(cfg: Config) -> None:
     try:
         await asyncio.wait_for(_automated_login(cfg), timeout=_LOGIN_TIMEOUT)
     except TimeoutError as exc:
-        raise KBAuthError(f"Login timed out after {_LOGIN_TIMEOUT:.0f}s (stuck at {time.monotonic() - t0:.1f}s in).") from exc
+        raise KBAuthError(
+            f"Login timed out after {_LOGIN_TIMEOUT:.0f}s (stuck at {time.monotonic() - t0:.1f}s in)."
+        ) from exc
 
 
 async def _automated_login(cfg: Config) -> None:
@@ -159,12 +161,179 @@ _PASTE_JS = """({selector, html}) => {
     return true;
 }"""
 
+# Both of the operations below need the live EditorView, which Weeek exposes only
+# as a Vue prop — no global, no handle on the DOM node. The walk below matches on
+# shape (an object with `.view` and `.schema`) and on which DOM element that view
+# owns, rather than on component names, so a reshuffled tree still resolves and a
+# page with two editors (a task's description and its comment box) cannot hand
+# back the wrong one.
+_FIND_EDITOR_JS = """
+    const isEditor = (o) => {
+        try { return o && typeof o === 'object' && o.view && o.schema && o.view.state && o.view.dom; }
+        catch (e) { return false; }
+    };
+    const findEditor = (selector) => {
+        const target = document.querySelector(selector);
+        if (!target) return null;
+        const owns = (ed) => ed.view.dom === target || target.contains(ed.view.dom) || ed.view.dom.contains(target);
+        const seen = new WeakSet();
+        let found = null;
+        const visit = (inst, depth) => {
+            if (!inst || found || depth > 60 || seen.has(inst)) return;
+            seen.add(inst);
+            for (const bagName of ['props', 'setupState', 'data', 'ctx']) {
+                const bag = inst[bagName];
+                if (!bag || typeof bag !== 'object') continue;
+                let keys = [];
+                try { keys = Object.keys(bag); } catch (e) { continue; }
+                for (const k of keys) {
+                    let v;
+                    try { v = bag[k]; } catch (e) { continue; }
+                    const raw = (v && typeof v === 'object' && v.__v_isRef) ? v.value : v;
+                    if (isEditor(raw) && owns(raw)) { found = raw; return; }
+                }
+            }
+            const walk = (vnode, d) => {
+                if (!vnode || typeof vnode !== 'object' || d > 40 || found) return;
+                if (vnode.component) visit(vnode.component, depth + 1);
+                if (Array.isArray(vnode.children)) vnode.children.forEach(c => walk(c, d + 1));
+                if (vnode.dynamicChildren) vnode.dynamicChildren.forEach(c => walk(c, d + 1));
+                if (vnode.suspense) walk(vnode.suspense.activeBranch, d + 1);
+            };
+            walk(inst.subTree, 0);
+        };
+        for (const el of document.querySelectorAll('*')) {
+            const inst = (el.__vue_app__ && el.__vue_app__._instance) || (el._vnode && el._vnode.component);
+            if (!inst) continue;
+            visit(inst, 0);
+            if (found) return found;
+        }
+        return null;
+    };
+"""
 
-async def replace_article_content(cfg: Config, workspace_id: str, article_id: str, html: str) -> None:
-    """Replace a KB article's body in place by driving Weeek's own editor."""
+# Selecting everything and pressing Delete does not empty a document that
+# contains a table: the table survives the keypress, so the pasted copy lands
+# *next to* the old one. Deleting the whole range as a transaction does what the
+# keypress only looked like it was doing, and `pasteHTML` then parses the markup
+# through the editor's own clipboard parser.
+_REPLACE_CONTENT_JS = (
+    """({selector, html}) => {"""
+    + _FIND_EDITOR_JS
+    + """
+    const editor = findEditor(selector);
+    if (!editor) return {ok: false, error: 'editor instance not found'};
+    const view = editor.view;
+    if (html && typeof view.pasteHTML !== 'function') return {ok: false, error: 'pasteHTML unavailable'};
+    view.dispatch(view.state.tr.delete(0, view.state.doc.content.size));
+    if (html) view.pasteHTML(html);
+    return {ok: true, size: view.state.doc.content.size};
+}"""
+)
+
+# Column widths are a node attribute the editor's HTML parser ignores (its
+# table_body spec parses a bare `tbody`), so they cannot ride in with a paste.
+# They have to be set the way the editor's own resizer sets them: a transaction
+# on the live EditorView, which then syncs over the collaborative websocket.
+_APPLY_COLUMNS_JS = (
+    """({selector, plan, minWidth, fallbackWidth}) => {"""
+    + _FIND_EDITOR_JS
+    + """
+    const editor = findEditor(selector);
+    if (!editor) return {ok: false, error: 'editor instance not found'};
+    const view = editor.view;
+
+    const bodies = [];
+    view.state.doc.descendants((node, pos) => {
+        if (node.type.name === 'table_body') bodies.push({node, pos});
+    });
+
+    // The content column, measured rather than assumed: it is what "fit" means.
+    const dom = view.dom;
+    const style = getComputedStyle(dom);
+    const pad = parseFloat(style.paddingLeft || '0') + parseFloat(style.paddingRight || '0');
+    const available = Math.max(minWidth, Math.round((dom.clientWidth || fallbackWidth) - pad));
+
+    const columnCount = (body) => {
+        const row = body.firstChild;
+        if (!row) return 0;
+        let n = 0;
+        row.forEach(cell => { n += (cell.attrs && cell.attrs.colspan) || 1; });
+        return n;
+    };
+
+    let tr = view.state.tr;
+    let changed = 0;
+    bodies.forEach((entry, i) => {
+        const spec = plan[i];
+        if (!spec) return;
+        const n = columnCount(entry.node);
+        if (!n) return;
+
+        let widths;
+        if (spec.mode === 'fit') {
+            const each = Math.max(minWidth, Math.floor(available / n));
+            widths = Array.from({length: n}, (_, k) =>
+                k === n - 1 ? Math.max(minWidth, available - each * (n - 1)) : each);
+        } else {
+            widths = spec.widths || [];
+        }
+
+        let prev = [];
+        try { prev = entry.node.attrs.columns ? JSON.parse(entry.node.attrs.columns) : []; } catch (e) { prev = []; }
+        const columns = Array.from({length: n}, (_, k) => {
+            const old = prev[k] || {};
+            const w = widths[k] == null ? (old.width || fallbackWidth) : widths[k];
+            return {
+                id: old.id || crypto.randomUUID(),
+                width: Math.max(minWidth, Math.round(w)),
+                color: old.color || '',
+                backgroundColor: old.backgroundColor || '',
+            };
+        });
+        tr = tr.setNodeAttribute(entry.pos, 'columns', JSON.stringify(columns));
+        changed++;
+    });
+
+    if (changed) view.dispatch(tr);
+    return {ok: true, tables: bodies.length, changed, available};
+}"""
+)
+
+
+async def replace_article_content(
+    cfg: Config,
+    workspace_id: str,
+    article_id: str,
+    html: str,
+    columns_plan: list[dict | None] | None = None,
+) -> None:
+    """Replace a KB article's body in place by driving Weeek's own editor.
+
+    ``columns_plan`` restores table column widths right after the paste, in the
+    same browser session — pasted markup always lands with default widths.
+    """
     await _replace_editor_content(
-        cfg, f"/ws/{workspace_id}/kb/{article_id}", html, what="document body", selector=_KB_EDITOR
+        cfg,
+        f"/ws/{workspace_id}/kb/{article_id}",
+        html,
+        what="document body",
+        selector=_KB_EDITOR,
+        columns_plan=columns_plan,
     )
+
+
+async def set_table_columns(cfg: Config, workspace_id: str, article_id: str, plan: list[dict | None]) -> dict:
+    """Set column widths on an article's tables without touching their content."""
+    t0 = time.monotonic()
+    try:
+        return await asyncio.wait_for(
+            _size_tables(cfg, f"/ws/{workspace_id}/kb/{article_id}", plan), timeout=_EDIT_TIMEOUT
+        )
+    except TimeoutError as exc:
+        raise KBAuthError(
+            f"Sizing the tables timed out after {_EDIT_TIMEOUT:.0f}s (stuck at {time.monotonic() - t0:.1f}s in)."
+        ) from exc
 
 
 async def replace_task_description(cfg: Config, workspace_id: str, task_id: str, html: str) -> None:
@@ -183,7 +352,15 @@ async def replace_task_description(cfg: Config, workspace_id: str, task_id: str,
     )
 
 
-async def _replace_editor_content(cfg: Config, page_path: str, html: str, *, what: str, selector: str) -> None:
+async def _replace_editor_content(
+    cfg: Config,
+    page_path: str,
+    html: str,
+    *,
+    what: str,
+    selector: str,
+    columns_plan: list[dict | None] | None = None,
+) -> None:
     """Drive one of Weeek's collaborative editors to hold exactly ``html``.
 
     Bounded by ``_EDIT_TIMEOUT`` so a stuck browser/editor fails with a clear error
@@ -191,18 +368,78 @@ async def _replace_editor_content(cfg: Config, page_path: str, html: str, *, wha
     """
     t0 = time.monotonic()
     try:
-        await asyncio.wait_for(_edit(cfg, page_path, html, what, selector), timeout=_EDIT_TIMEOUT)
+        await asyncio.wait_for(_edit(cfg, page_path, html, what, selector, columns_plan), timeout=_EDIT_TIMEOUT)
     except TimeoutError as exc:
         raise KBAuthError(
             f"Editing the {what} timed out after {_EDIT_TIMEOUT:.0f}s (stuck at {time.monotonic() - t0:.1f}s in)."
         ) from exc
 
 
-async def _edit(cfg: Config, page_path: str, html: str, what: str, selector: str) -> None:
-    """Open the page headlessly, clear the editor ``selector`` points at, paste new HTML.
+async def _clipboard_replace(page, selector: str, html: str, what: str) -> None:
+    """Select-all, Delete, paste — the route used before the editor was reachable."""
+    if not await page.evaluate(_SELECT_ALL_JS, selector):
+        raise KBAuthError(f"Could not locate the editor for the {what}.")
+    await page.keyboard.press("Delete")
+    await page.wait_for_timeout(300)
+    if html.strip() and not await page.evaluate(_PASTE_JS, {"selector": selector, "html": html}):
+        raise KBAuthError(f"Could not locate the editor for the {what}.")
+
+
+async def _apply_columns(page, plan: list[dict | None], selector: str = _KB_EDITOR) -> dict:
+    """Run the width transaction and let the collaborative sync carry it server-side."""
+    from .tables import FALLBACK_CONTENT_WIDTH, MIN_WIDTH
+
+    result: dict = await page.evaluate(
+        _APPLY_COLUMNS_JS,
+        {"selector": selector, "plan": plan, "minWidth": MIN_WIDTH, "fallbackWidth": FALLBACK_CONTENT_WIDTH},
+    )
+    if not result.get("ok"):
+        raise KBAuthError(f"Could not set table widths: {result.get('error', 'unknown reason')}.")
+    await page.wait_for_timeout(4000)
+    return result
+
+
+async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None]) -> dict:
+    """Open the article headlessly and set column widths, leaving content alone."""
+    from playwright.async_api import async_playwright
+
+    if not cfg.storage_state_path.exists():
+        raise KBAuthError("No saved session. Run `weeek-mcp-login` first.")
+
+    log = make_logger(cfg.log_path, "weeek-mcp/kb")
+    t0 = time.monotonic()
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=cfg.headless)
+        context = await browser.new_context(storage_state=str(cfg.storage_state_path))
+        page = await context.new_page()
+        try:
+            await page.goto(cfg.app_base + page_path, wait_until="domcontentloaded", timeout=15000)
+            if "/login" in page.url or "/welcome" in page.url:
+                raise KBAuthError("Session expired. Run `weeek-mcp-login` to refresh.")
+            await page.wait_for_selector(_KB_EDITOR, timeout=20000)
+            await page.wait_for_timeout(5000)  # let the collaborative websocket connect
+            result = await _apply_columns(page, plan)
+            log(f"size tables: {result['changed']}/{result['tables']} in {time.monotonic() - t0:.1f}s")
+            return result
+        finally:
+            await browser.close()
+
+
+async def _edit(
+    cfg: Config,
+    page_path: str,
+    html: str,
+    what: str,
+    selector: str,
+    columns_plan: list[dict | None] | None = None,
+) -> None:
+    """Open the page headlessly and make the editor ``selector`` points at hold ``html``.
 
     Weeek persists these bodies through a collaborative websocket, not REST, so
     ProseMirror has to parse the HTML and sync it itself. Ids are preserved.
+    The replacement runs as an editor transaction, falling back to the clipboard
+    route only if the editor instance cannot be reached — that fallback cannot
+    clear tables (see ``_REPLACE_CONTENT_JS``), so it is a last resort.
     """
     from playwright.async_api import async_playwright
 
@@ -227,17 +464,16 @@ async def _edit(cfg: Config, page_path: str, html: str, what: str, selector: str
                 raise KBAuthError(f"Could not locate the editor for the {what}.")
             await editor.click()
             await page.wait_for_timeout(200)
-            if not await page.evaluate(_SELECT_ALL_JS, selector):
-                raise KBAuthError(f"Could not locate the editor for the {what}.")
-            await page.keyboard.press("Delete")
-            await page.wait_for_timeout(300)
 
-            if html.strip():
-                ok = await page.evaluate(_PASTE_JS, {"selector": selector, "html": html})
-                if not ok:
-                    raise KBAuthError(f"Could not locate the editor for the {what}.")
+            replaced = await page.evaluate(_REPLACE_CONTENT_JS, {"selector": selector, "html": html.strip()})
+            if not replaced.get("ok"):
+                log(f"edit {what}: transaction route unavailable ({replaced.get('error')}), using the clipboard")
+                await _clipboard_replace(page, selector, html, what)
             # Give the collaborative sync time to persist server-side.
             await page.wait_for_timeout(5000)
+            if columns_plan:
+                sized = await _apply_columns(page, columns_plan, selector)
+                log(f"edit {what}: sized {sized['changed']}/{sized['tables']} table(s)")
             log(f"edit {what}: done in {time.monotonic() - t0:.1f}s")
         finally:
             await browser.close()
