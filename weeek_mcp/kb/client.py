@@ -429,14 +429,7 @@ class WeeekKB:
         before = read_tables(await self._document_content(doc_id))
         after = read_tables(markdown_to_doc(markdown))
         plan = carry_over_plan(before, after) if after else None
-        await replace_article_content(
-            self._cfg,
-            ws,
-            str(doc_id),
-            markdown_to_html(markdown),
-            columns_plan=plan,
-            tables_present=bool(before or after),
-        )
+        await replace_article_content(self._cfg, ws, str(doc_id), markdown_to_html(markdown), columns_plan=plan)
 
     async def set_table_widths(
         self,
@@ -446,19 +439,33 @@ class WeeekKB:
         widths: list[int | None] | None = None,
         fit: bool = False,
     ) -> dict:
-        """Set column widths on a document's tables, leaving their content alone."""
+        """Set column widths on a document's tables, leaving their content alone.
+
+        The widths are read back afterwards and compared with what was asked for:
+        the edit travels over a collaborative websocket, so a dropped sync has to
+        surface as an error rather than as a success with nothing changed.
+        """
         ws = await self._workspace()
         if not self._cfg.storage_state_path.exists():
             await self._refresh_session()
         tables = read_tables(await self._document_content(doc_id))
         plan = widths_plan(tables, table_index, widths, fit=fit)
         result = await set_table_columns(self._cfg, ws, str(doc_id), plan)
-        applied = read_tables(await self._document_content(doc_id))
+
+        stored = [t.widths for t in read_tables(await self._document_content(doc_id))]
+        expected: list[list[int] | None] = result["expected"]
+        for i, want in enumerate(expected):
+            if want is not None and (i >= len(stored) or stored[i] != want):
+                raise KBError(
+                    f"Table {i} was set to {want} but Weeek now reports "
+                    f"{stored[i] if i < len(stored) else 'no such table'}. The editor syncs over a "
+                    "websocket, so a slow connection can drop the change; retry the same call."
+                )
         return {
-            "tables": len(applied),
-            "changed": result.get("changed", 0),
-            "content_width": result.get("available"),
-            "widths": [t.widths for t in applied],
+            "tables": result["tables"],
+            "changed": result["changed"],
+            "content_width": result["available"],
+            "widths": stored,
         }
 
     async def export_documents(self, target_dir: str, *, query: str = "") -> dict:

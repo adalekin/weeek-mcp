@@ -5,10 +5,13 @@ import json
 import pytest
 
 from weeek_mcp.kb.tables import (
+    MeasuredTable,
     TableInfo,
+    TableShapeError,
     carry_over_plan,
     fit_widths,
     read_tables,
+    resolve_columns,
     size_new_tables,
     widths_plan,
 )
@@ -137,10 +140,84 @@ def test_widths_and_fit_are_mutually_exclusive():
     tables = [TableInfo(columns=2, widths=None)]
     with pytest.raises(ValueError, match="either widths or fit"):
         widths_plan(tables, 0, [100, 100], fit=True)
-    with pytest.raises(ValueError, match="either widths or fit"):
+
+
+def test_one_of_widths_or_fit_is_required():
+    tables = [TableInfo(columns=2, widths=None)]
+    with pytest.raises(ValueError, match="Pass widths"):
         widths_plan(tables, 0, None, fit=False)
 
 
 def test_a_document_without_tables_is_an_error():
     with pytest.raises(ValueError, match="no tables"):
         widths_plan([], 0, None, fit=True)
+
+
+# ------------------------------------------------------------- resolving a plan into attributes
+
+
+def test_resolve_fit_fills_the_measured_width():
+    columns = resolve_columns([MeasuredTable(columns=2, raw_columns=None)], [{"mode": "fit"}], 700)
+    assert [c["width"] for c in columns[0]] == [350, 350]
+    assert all(c["id"] for c in columns[0])
+
+
+def test_resolve_keeps_ids_and_colors_of_existing_columns():
+    raw = json.dumps(
+        [
+            {"id": "keep-me", "width": 120, "color": "#111", "backgroundColor": "PaleBlue"},
+            {"id": "and-me", "width": 120, "color": "", "backgroundColor": ""},
+        ]
+    )
+    columns = resolve_columns(
+        [MeasuredTable(columns=2, raw_columns=raw)], [{"mode": "widths", "widths": [300, 200]}], 676
+    )
+    assert [(c["id"], c["width"], c["color"]) for c in columns[0]] == [
+        ("keep-me", 300, "#111"),
+        ("and-me", 200, ""),
+    ]
+    assert columns[0][0]["backgroundColor"] == "PaleBlue"
+
+
+def test_resolve_leaves_null_widths_at_their_current_size():
+    raw = json.dumps([{"id": "a", "width": 120}, {"id": "b", "width": 400}])
+    columns = resolve_columns(
+        [MeasuredTable(columns=2, raw_columns=raw)], [{"mode": "widths", "widths": [None, 300]}], 676
+    )
+    assert [c["width"] for c in columns[0]] == [120, 300]
+
+
+def test_resolve_falls_back_to_the_editor_default_for_unknown_columns():
+    columns = resolve_columns(
+        [MeasuredTable(columns=2, raw_columns=None)], [{"mode": "widths", "widths": [None, 300]}], 676
+    )
+    assert [c["width"] for c in columns[0]] == [180, 300]
+
+
+def test_resolve_skips_tables_the_plan_does_not_name():
+    columns = resolve_columns(
+        [MeasuredTable(columns=2, raw_columns=None), MeasuredTable(columns=3, raw_columns=None)],
+        [None, {"mode": "fit"}],
+        600,
+    )
+    assert columns[0] is None
+    assert [c["width"] for c in columns[1]] == [200, 200, 200]
+
+
+def test_resolve_refuses_when_the_document_gained_a_table():
+    with pytest.raises(TableShapeError, match="2 table"):
+        resolve_columns(
+            [MeasuredTable(columns=2, raw_columns=None), MeasuredTable(columns=2, raw_columns=None)],
+            [{"mode": "fit"}],
+            676,
+        )
+
+
+def test_resolve_refuses_when_a_table_changed_shape():
+    with pytest.raises(TableShapeError, match="3 column"):
+        resolve_columns([MeasuredTable(columns=3, raw_columns=None)], [{"mode": "widths", "widths": [100, 100]}], 676)
+
+
+def test_resolve_never_goes_below_the_editor_minimum():
+    columns = resolve_columns([MeasuredTable(columns=2, raw_columns=None)], [{"mode": "fit"}], 100)
+    assert [c["width"] for c in columns[0]] == [90, 90]

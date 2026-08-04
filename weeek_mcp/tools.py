@@ -784,7 +784,9 @@ KB_TOOLS: list[types.Tool] = [
             "creation, supporting: headings, nested bullet/numbered/checkbox lists, "
             "blockquotes, fenced code, horizontal rules, pipe tables, images "
             "(![alt](url)), and inline **bold**, *italic*, ~~strike~~, `code`, "
-            "[links](url). parent_id nests it under another document (folder)."
+            "[links](url). parent_id nests it under another document (folder). "
+            "Tables are created spanning the document's content column, with the "
+            "width split evenly between the columns; weeek_kb_table_widths changes that."
         ),
         inputSchema={
             "type": "object",
@@ -814,7 +816,9 @@ KB_TOOLS: list[types.Tool] = [
             "weeek_kb_create (headings, nested lists, tables, images, "
             "bold/italic/strike/code/links). Note: content replacement drives Weeek's "
             "editor in a headless browser (a few seconds) because bodies sync over a "
-            "collaborative channel, not REST."
+            "collaborative channel, not REST. Table column widths are carried across the "
+            "replacement; a table that gained or lost a column is re-spread across the "
+            "content column instead."
         ),
         inputSchema={
             "type": "object",

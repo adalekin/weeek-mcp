@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from contextlib import asynccontextmanager
 
 from ..config import Config
 from ..logging_util import make_logger
@@ -221,13 +222,17 @@ _REPLACE_CONTENT_JS = (
     """({selector, html}) => {"""
     + _FIND_EDITOR_JS
     + """
+    const target = document.querySelector(selector);
+    // Reported even when the editor cannot be reached: it decides whether the
+    // caller may fall back to the clipboard route, which cannot clear a table.
+    const hasTables = !!(target && target.querySelector('table'));
     const editor = findEditor(selector);
-    if (!editor) return {ok: false, error: 'editor instance not found'};
+    if (!editor) return {ok: false, error: 'editor instance not found', hasTables};
     const view = editor.view;
-    if (html && typeof view.pasteHTML !== 'function') return {ok: false, error: 'pasteHTML unavailable'};
+    if (html && typeof view.pasteHTML !== 'function') return {ok: false, error: 'pasteHTML unavailable', hasTables};
     view.dispatch(view.state.tr.delete(0, view.state.doc.content.size));
     if (html) view.pasteHTML(html);
-    return {ok: true, size: view.state.doc.content.size};
+    return {ok: true, hasTables, size: view.state.doc.content.size};
 }"""
 )
 
@@ -235,24 +240,17 @@ _REPLACE_CONTENT_JS = (
 # table_body spec parses a bare `tbody`), so they cannot ride in with a paste.
 # They have to be set the way the editor's own resizer sets them: a transaction
 # on the live EditorView, which then syncs over the collaborative websocket.
-_APPLY_COLUMNS_JS = (
-    """({selector, plan, minWidth, defaultWidth, fallbackWidth}) => {"""
+#
+# This runs in two steps — report what is there, then write what Python worked
+# out — so that no width arithmetic happens in the browser, where it could not
+# be tested, and so that a document edited between the two steps is caught.
+_MEASURE_TABLES_JS = (
+    """({selector, minWidth, fallbackWidth}) => {"""
     + _FIND_EDITOR_JS
     + """
     const editor = findEditor(selector);
     if (!editor) return {ok: false, error: 'editor instance not found'};
     const view = editor.view;
-
-    const bodies = [];
-    view.state.doc.descendants((node, pos) => {
-        if (node.type.name === 'table_body') bodies.push({node, pos});
-    });
-
-    // The content column, measured rather than assumed: it is what "fit" means.
-    const dom = view.dom;
-    const style = getComputedStyle(dom);
-    const pad = parseFloat(style.paddingLeft || '0') + parseFloat(style.paddingRight || '0');
-    const available = Math.max(minWidth, Math.round((dom.clientWidth || fallbackWidth) - pad));
 
     const columnCount = (body) => {
         const row = body.firstChild;
@@ -262,41 +260,48 @@ _APPLY_COLUMNS_JS = (
         return n;
     };
 
-    let tr = view.state.tr;
-    let changed = 0;
-    bodies.forEach((entry, i) => {
-        const spec = plan[i];
-        if (!spec) return;
-        const n = columnCount(entry.node);
-        if (!n) return;
-
-        let widths;
-        if (spec.mode === 'fit') {
-            const each = Math.max(minWidth, Math.floor(available / n));
-            widths = Array.from({length: n}, (_, k) =>
-                k === n - 1 ? Math.max(minWidth, available - each * (n - 1)) : each);
-        } else {
-            widths = spec.widths || [];
+    const tables = [];
+    view.state.doc.descendants((node) => {
+        if (node.type.name === 'table_body') {
+            tables.push({columns: columnCount(node), raw_columns: node.attrs.columns || null});
         }
-
-        let prev = [];
-        try { prev = entry.node.attrs.columns ? JSON.parse(entry.node.attrs.columns) : []; } catch (e) { prev = []; }
-        const columns = Array.from({length: n}, (_, k) => {
-            const old = prev[k] || {};
-            const w = widths[k] == null ? (old.width || defaultWidth) : widths[k];
-            return {
-                id: old.id || crypto.randomUUID(),
-                width: Math.max(minWidth, Math.round(w)),
-                color: old.color || '',
-                backgroundColor: old.backgroundColor || '',
-            };
-        });
-        tr = tr.setNodeAttribute(entry.pos, 'columns', JSON.stringify(columns));
-        changed++;
     });
 
+    // The content column, measured rather than assumed: it is what "fit" means.
+    const dom = view.dom;
+    const style = getComputedStyle(dom);
+    const pad = parseFloat(style.paddingLeft || '0') + parseFloat(style.paddingRight || '0');
+    const available = Math.max(minWidth, Math.round((dom.clientWidth || fallbackWidth) - pad));
+
+    return {ok: true, tables, available};
+}"""
+)
+
+_APPLY_COLUMNS_JS = (
+    """({selector, columns}) => {"""
+    + _FIND_EDITOR_JS
+    + """
+    const editor = findEditor(selector);
+    if (!editor) return {ok: false, error: 'editor instance not found'};
+    const view = editor.view;
+
+    const positions = [];
+    view.state.doc.descendants((node, pos) => {
+        if (node.type.name === 'table_body') positions.push(pos);
+    });
+    if (positions.length !== columns.length) {
+        return {ok: false, error: 'the document changed while it was being resized'};
+    }
+
+    let tr = view.state.tr;
+    let changed = 0;
+    positions.forEach((pos, i) => {
+        if (!columns[i]) return;
+        tr = tr.setNodeAttribute(pos, 'columns', JSON.stringify(columns[i]));
+        changed++;
+    });
     if (changed) view.dispatch(tr);
-    return {ok: true, tables: bodies.length, changed, available};
+    return {ok: true, tables: positions.length, changed};
 }"""
 )
 
@@ -307,14 +312,11 @@ async def replace_article_content(
     article_id: str,
     html: str,
     columns_plan: list[dict | None] | None = None,
-    tables_present: bool = False,
 ) -> None:
     """Replace a KB article's body in place by driving Weeek's own editor.
 
     ``columns_plan`` restores table column widths right after the replacement, in
     the same browser session — new markup always lands with default widths.
-    ``tables_present`` says the document holds tables either before or after, which
-    rules out the clipboard fallback.
     """
     await _replace_editor_content(
         cfg,
@@ -323,7 +325,6 @@ async def replace_article_content(
         what="document body",
         selector=_KB_EDITOR,
         columns_plan=columns_plan,
-        tables_present=tables_present,
     )
 
 
@@ -364,7 +365,6 @@ async def _replace_editor_content(
     what: str,
     selector: str,
     columns_plan: list[dict | None] | None = None,
-    tables_present: bool = False,
 ) -> None:
     """Drive one of Weeek's collaborative editors to hold exactly ``html``.
 
@@ -373,9 +373,7 @@ async def _replace_editor_content(
     """
     t0 = time.monotonic()
     try:
-        await asyncio.wait_for(
-            _edit(cfg, page_path, html, what, selector, columns_plan, tables_present), timeout=_EDIT_TIMEOUT
-        )
+        await asyncio.wait_for(_edit(cfg, page_path, html, what, selector, columns_plan), timeout=_EDIT_TIMEOUT)
     except TimeoutError as exc:
         raise KBAuthError(
             f"Editing the {what} timed out after {_EDIT_TIMEOUT:.0f}s (stuck at {time.monotonic() - t0:.1f}s in)."
@@ -392,28 +390,9 @@ async def _clipboard_replace(page, selector: str, html: str, what: str) -> None:
         raise KBAuthError(f"Could not locate the editor for the {what}.")
 
 
-async def _apply_columns(page, plan: list[dict | None], selector: str = _KB_EDITOR) -> dict:
-    """Run the width transaction and let the collaborative sync carry it server-side."""
-    from .tables import DEFAULT_COLUMN_WIDTH, FALLBACK_CONTENT_WIDTH, MIN_WIDTH
-
-    result: dict = await page.evaluate(
-        _APPLY_COLUMNS_JS,
-        {
-            "selector": selector,
-            "plan": plan,
-            "minWidth": MIN_WIDTH,
-            "defaultWidth": DEFAULT_COLUMN_WIDTH,
-            "fallbackWidth": FALLBACK_CONTENT_WIDTH,
-        },
-    )
-    if not result.get("ok"):
-        raise KBAuthError(f"Could not set table widths: {result.get('error', 'unknown reason')}.")
-    await page.wait_for_timeout(4000)
-    return result
-
-
-async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None]) -> dict:
-    """Open the article headlessly and set column widths, leaving content alone."""
+@asynccontextmanager
+async def _editor_page(cfg: Config, page_path: str, selector: str, what: str):
+    """Open ``page_path`` headlessly with the saved session, editor ready to drive."""
     from playwright.async_api import async_playwright
 
     if not cfg.storage_state_path.exists():
@@ -429,13 +408,57 @@ async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None]) -> 
             await page.goto(cfg.app_base + page_path, wait_until="domcontentloaded", timeout=15000)
             if "/login" in page.url or "/welcome" in page.url:
                 raise KBAuthError("Session expired. Run `weeek-mcp-login` to refresh.")
-            await page.wait_for_selector(_KB_EDITOR, timeout=20000)
-            await page.wait_for_timeout(5000)  # let the collaborative websocket connect
-            result = await _apply_columns(page, plan)
-            log(f"size tables: {result['changed']}/{result['tables']} in {time.monotonic() - t0:.1f}s")
-            return result
+            editor = await page.wait_for_selector(selector, timeout=20000)
+            if editor is None:
+                raise KBAuthError(f"Could not locate the editor for the {what}.")
+            log(f"{what}: editor ready in {time.monotonic() - t0:.1f}s")
+            # The editor renders before the collaborative websocket has caught up;
+            # acting sooner would edit a document that is not there yet.
+            await page.wait_for_timeout(5000)
+            yield page, editor, log
         finally:
             await browser.close()
+
+
+async def _apply_columns(page, selector: str, plan: list[dict | None]) -> dict:
+    """Size the tables the plan describes, then let the collaborative sync persist it.
+
+    Measures first and resolves the widths in Python: the browser only writes the
+    attribute it is handed, and a document that changed between the two steps is
+    refused rather than written to blindly.
+    """
+    from .tables import FALLBACK_CONTENT_WIDTH, MIN_WIDTH, MeasuredTable, resolve_columns
+
+    measured: dict = await page.evaluate(
+        _MEASURE_TABLES_JS,
+        {"selector": selector, "minWidth": MIN_WIDTH, "fallbackWidth": FALLBACK_CONTENT_WIDTH},
+    )
+    if not measured.get("ok"):
+        raise KBAuthError(f"Could not read the tables: {measured.get('error', 'unknown reason')}.")
+
+    tables = [MeasuredTable(columns=t["columns"], raw_columns=t.get("raw_columns")) for t in measured["tables"]]
+    available = int(measured["available"])
+    columns = resolve_columns(tables, plan, available)
+
+    applied: dict = await page.evaluate(_APPLY_COLUMNS_JS, {"selector": selector, "columns": columns})
+    if not applied.get("ok"):
+        raise KBAuthError(f"Could not set table widths: {applied.get('error', 'unknown reason')}.")
+    await page.wait_for_timeout(4000)
+    return {
+        "tables": applied["tables"],
+        "changed": applied["changed"],
+        "available": available,
+        "expected": [[c["width"] for c in cols] if cols else None for cols in columns],
+    }
+
+
+async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None]) -> dict:
+    """Open the article headlessly and set column widths, leaving content alone."""
+    t0 = time.monotonic()
+    async with _editor_page(cfg, page_path, _KB_EDITOR, "size tables") as (page, _editor, log):
+        result = await _apply_columns(page, _KB_EDITOR, plan)
+        log(f"size tables: {result['changed']}/{result['tables']} in {time.monotonic() - t0:.1f}s")
+        return result
 
 
 async def _edit(
@@ -445,7 +468,6 @@ async def _edit(
     what: str,
     selector: str,
     columns_plan: list[dict | None] | None = None,
-    tables_present: bool = False,
 ) -> None:
     """Open the page headlessly and make the editor ``selector`` points at hold ``html``.
 
@@ -455,47 +477,26 @@ async def _edit(
     route only if the editor instance cannot be reached — that fallback cannot
     clear tables (see ``_REPLACE_CONTENT_JS``), so it is a last resort.
     """
-    from playwright.async_api import async_playwright
-
-    if not cfg.storage_state_path.exists():
-        raise KBAuthError("No saved session. Run `weeek-mcp-login` first.")
-
-    log = make_logger(cfg.log_path, "weeek-mcp/kb")
     t0 = time.monotonic()
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=cfg.headless)
-        context = await browser.new_context(storage_state=str(cfg.storage_state_path))
-        page = await context.new_page()
-        try:
-            await page.goto(cfg.app_base + page_path, wait_until="domcontentloaded", timeout=15000)
-            if "/login" in page.url or "/welcome" in page.url:
-                raise KBAuthError("Session expired. Run `weeek-mcp-login` to refresh.")
-            # Wait for the editor and its collaborative websocket to connect.
-            editor = await page.wait_for_selector(selector, timeout=20000)
-            log(f"edit {what}: editor ready in {time.monotonic() - t0:.1f}s")
-            await page.wait_for_timeout(5000)
-            if editor is None:
-                raise KBAuthError(f"Could not locate the editor for the {what}.")
-            await editor.click()
-            await page.wait_for_timeout(200)
+    async with _editor_page(cfg, page_path, selector, f"edit {what}") as (page, editor, log):
+        await editor.click()
+        await page.wait_for_timeout(200)
 
-            replaced = await page.evaluate(_REPLACE_CONTENT_JS, {"selector": selector, "html": html.strip()})
-            if not replaced.get("ok"):
-                if tables_present or "<table" in html.lower():
-                    # The clipboard route cannot clear a table, so it would leave the old
-                    # one sitting next to the new content. Refusing beats writing that.
-                    raise KBAuthError(
-                        f"Could not reach Weeek's editor to replace the {what} "
-                        f"({replaced.get('error', 'unknown reason')}), and the fallback route "
-                        "cannot replace tables without duplicating them, so nothing was written."
-                    )
-                log(f"edit {what}: transaction route unavailable ({replaced.get('error')}), using the clipboard")
-                await _clipboard_replace(page, selector, html, what)
-            # Give the collaborative sync time to persist server-side.
-            await page.wait_for_timeout(5000)
-            if columns_plan:
-                sized = await _apply_columns(page, columns_plan, selector)
-                log(f"edit {what}: sized {sized['changed']}/{sized['tables']} table(s)")
-            log(f"edit {what}: done in {time.monotonic() - t0:.1f}s")
-        finally:
-            await browser.close()
+        replaced = await page.evaluate(_REPLACE_CONTENT_JS, {"selector": selector, "html": html.strip()})
+        if not replaced.get("ok"):
+            if replaced.get("hasTables") or "<table" in html.lower():
+                # The clipboard route cannot clear a table, so it would leave the old
+                # one sitting next to the new content. Refusing beats writing that.
+                raise KBAuthError(
+                    f"Could not reach Weeek's editor to replace the {what} "
+                    f"({replaced.get('error', 'unknown reason')}), and the fallback route "
+                    "cannot replace tables without duplicating them, so nothing was written."
+                )
+            log(f"edit {what}: transaction route unavailable ({replaced.get('error')}), using the clipboard")
+            await _clipboard_replace(page, selector, html, what)
+        # Give the collaborative sync time to persist server-side.
+        await page.wait_for_timeout(5000)
+        if columns_plan:
+            sized = await _apply_columns(page, selector, columns_plan)
+            log(f"edit {what}: sized {sized['changed']}/{sized['tables']} table(s)")
+        log(f"edit {what}: done in {time.monotonic() - t0:.1f}s")
