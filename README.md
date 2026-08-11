@@ -93,7 +93,8 @@ Add to `claude_desktop_config.json`:
 `weeek_add_task_to_project`, `weeek_remove_task_from_project`, `weeek_set_watchers`,
 `weeek_remove_watchers`, `weeek_task_timer`, `weeek_manage_time_entry`,
 `weeek_upload_attachment`, `weeek_get_attachment`, `weeek_list_custom_fields`,
-`weeek_list_task_comments`, `weeek_add_task_comment`, `weeek_update_task_comment`.
+`weeek_list_task_comments`, `weeek_add_task_comment`, `weeek_update_task_comment`,
+`weeek_delete_task_comment`.
 
 **Workspace admin:** `weeek_manage_tags`, `weeek_manage_projects`,
 `weeek_manage_boards`, `weeek_manage_board_columns`, `weeek_manage_portfolios`,
@@ -121,9 +122,10 @@ is what that endpoint stores.
 
 Comments are read with `weeek_list_task_comments`, written with `weeek_add_task_comment`
 and rewritten in place with `weeek_update_task_comment` (all Markdown) — an edited comment
-beats posting a correction under the original. Weeek's public API has no comments at all,
-so these go through its web API on the knowledge base session; no browser is launched,
-only the saved cookies.
+beats posting a correction under the original. `weeek_delete_task_comment` removes one for
+good; Weeek keeps no trash for comments. Weeek's public API has no comments at all, so
+these go through its web API on the knowledge base session; no browser is launched, only
+the saved cookies.
 
 **Knowledge base:** `weeek_kb_search`, `weeek_kb_list`, `weeek_kb_read`,
 `weeek_kb_create`, `weeek_kb_update`, `weeek_kb_table_widths`, `weeek_kb_icons`,

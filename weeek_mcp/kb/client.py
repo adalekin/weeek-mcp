@@ -13,6 +13,7 @@ Endpoints (base ``{internal_api_base}/ws/{workspace_id}``):
   GET /tm/tasks/{id}/comments                                  -> task comments
   POST /tm/tasks/{id}/comments {content}                       -> add one
   PUT /tm/tasks/{id}/comments/{commentId} {content}            -> rewrite one
+  DELETE /tm/tasks/{id}/comments/{commentId}                   -> remove one
 
 Task comments live here rather than in the client for the public REST API because the public
 API has no route for them at all (``/tm/tasks/{id}/comments`` and every neighbouring spelling
@@ -543,3 +544,8 @@ class WeeekKB:
             {"content": markdown_to_doc(markdown)},
         )
         return data.get("comment") or data
+
+    async def delete_task_comment(self, task_id: int, comment_id: int) -> None:
+        """Remove a comment. Weeek has no trash for these — it is gone."""
+        ws = await self._workspace()
+        await self._delete(f"/ws/{ws}/tm/tasks/{task_id}/comments/{comment_id}")

@@ -39,6 +39,9 @@ class FakeKB:
         self.posted.append((task_id, comment_id, markdown))
         return _stored(markdown)
 
+    async def delete_task_comment(self, task_id, comment_id):
+        self.posted.append(("delete", task_id, comment_id))
+
 
 @pytest.mark.asyncio
 async def test_list_task_comments_renders_the_document_as_text():
@@ -84,6 +87,21 @@ async def test_update_task_comment_rewrites_the_same_comment():
 
     assert kb.posted == [(691, 263, "уточнение")]
     assert result == {"id": 263, "text": "уточнение"}
+
+
+@pytest.mark.asyncio
+async def test_delete_task_comment_reports_what_it_removed():
+    kb = FakeKB()
+
+    result = await tools.handle_task_tool(
+        "weeek_delete_task_comment",
+        {"task_id": 691, "comment_id": 263},
+        api=None,
+        kb=kb,
+    )
+
+    assert kb.posted == [("delete", 691, 263)]
+    assert result == {"deleted": 263}
 
 
 @pytest.mark.asyncio

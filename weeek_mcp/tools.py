@@ -780,6 +780,21 @@ TASK_TOOLS: list[types.Tool] = [
             "required": ["task_id", "comment_id", "text"],
         },
     ),
+    types.Tool(
+        name="weeek_delete_task_comment",
+        description=(
+            "Delete a comment for good — Weeek keeps no trash for these. To fix wording, "
+            "prefer weeek_update_task_comment. comment_id comes from weeek_list_task_comments."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "comment_id": {"type": "integer"},
+            },
+            "required": ["task_id", "comment_id"],
+        },
+    ),
 ]
 
 KB_TOOLS: list[types.Tool] = [
@@ -1097,6 +1112,9 @@ async def handle_task_tool(name: str, args: dict[str, Any], api: WeeekAPI, kb: W
             args["task_id"], args["comment_id"], args["text"]
         )
         return {"id": comment.get("id"), "text": _comment_text(comment)}
+    if name == "weeek_delete_task_comment":
+        await _require_kb(kb, "Deleting a comment").delete_task_comment(args["task_id"], args["comment_id"])
+        return {"deleted": args["comment_id"]}
     if name == "weeek_list_custom_fields":
         fields = await project_custom_fields(api, args["project_id"])
         return [
