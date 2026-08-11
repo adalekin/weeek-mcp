@@ -10,6 +10,12 @@ Endpoints (base ``{internal_api_base}/ws/{workspace_id}``):
   GET /kb/articles/{id}                                        -> article + content
   POST /kb/articles/{id}/avatar {objectType, objectId}         -> set the document icon
   DELETE /kb/articles/{id}/avatar                              -> clear the icon
+  GET /tm/tasks/{id}/comments                                  -> task comments
+  POST /tm/tasks/{id}/comments {content}                       -> add one
+
+Task comments live here rather than in the client for the public REST API because the public
+API has no route for them at all (``/tm/tasks/{id}/comments`` and every neighbouring spelling
+answer 404 there).
 
 Reference data for icons lives outside the workspace tree, at
 ``{internal_api_base}/app/avatars`` (colors, emoji groups, built-in icons).
@@ -505,3 +511,25 @@ class WeeekKB:
         if permanent:
             await self._delete(f"/ws/{ws}/kb/articles/{doc_id}")
         self._invalidate_cache()
+
+    # ------------------------------------------------------------- task comments
+    async def list_task_comments(self, task_id: int) -> list[dict]:
+        ws = await self._workspace()
+        data = await self._get(f"/ws/{ws}/tm/tasks/{task_id}/comments")
+        return data.get("comments") or []
+
+    async def add_task_comment(self, task_id: int, markdown: str) -> dict:
+        """Post a comment written as Markdown.
+
+        The body is ``{"content": <ProseMirror doc>}`` and the server stores that doc under
+        ``content.data``, filling in ``version`` and ``mentions`` itself (established by posting
+        to a live task and reading the response back). Sending the wrapper Weeek returns instead,
+        ``{"content": {"data": ...}}``, answers 500 after writing a comment nested one level too
+        deep, so the doc goes in bare.
+        """
+        ws = await self._workspace()
+        data = await self._post(
+            f"/ws/{ws}/tm/tasks/{task_id}/comments",
+            {"content": markdown_to_doc(markdown)},
+        )
+        return data.get("comment") or data

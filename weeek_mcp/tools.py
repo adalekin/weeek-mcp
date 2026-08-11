@@ -30,7 +30,7 @@ from typing import Any
 import mcp.types as types
 
 from .kb.client import KBDocument, WeeekKB
-from .kb.prosemirror import markdown_to_html
+from .kb.prosemirror import markdown_to_html, to_markdown
 from .kb.session import replace_task_description
 from .weeek_api import WeeekAPI
 
@@ -739,6 +739,31 @@ TASK_TOOLS: list[types.Tool] = [
             "required": ["action"],
         },
     ),
+    types.Tool(
+        name="weeek_list_task_comments",
+        description="List a task's comments, oldest first, with their author and text.",
+        inputSchema={
+            "type": "object",
+            "properties": {"task_id": {"type": "integer"}},
+            "required": ["task_id"],
+        },
+    ),
+    types.Tool(
+        name="weeek_add_task_comment",
+        description=(
+            "Comment on a task. The text is Markdown (paragraphs, lists, bold/italic/code, links) "
+            "and posts as you. Weeek's public API has no comments, so this drives its web API "
+            "through the browser session — it needs WEEEK_EMAIL/WEEEK_PASSWORD or a cached login."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "text": {"type": "string", "description": "Comment body as Markdown."},
+            },
+            "required": ["task_id", "text"],
+        },
+    ),
 ]
 
 KB_TOOLS: list[types.Tool] = [
@@ -990,6 +1015,32 @@ async def _write_description(kb: WeeekKB | None, task_id: int, markdown: str) ->
     return body
 
 
+def _require_kb(kb: WeeekKB | None, what: str) -> WeeekKB:
+    """Comments live only in Weeek's web API, which needs the browser session."""
+    if kb is None:
+        raise ValueError(
+            f"{what} needs the browser session: Weeek's public API has no comments endpoint. "
+            "Set WEEEK_EMAIL/WEEEK_PASSWORD or run `weeek-mcp-login`."
+        )
+    return kb
+
+
+def _comment_text(comment: dict) -> str:
+    return to_markdown((comment.get("content") or {}).get("data"))
+
+
+def _comments_digest(comments: list[dict]) -> list[dict]:
+    return [
+        {
+            "id": c.get("id"),
+            "author": (c.get("user") or {}).get("name"),
+            "sent_at": c.get("sentAt"),
+            "text": _comment_text(c),
+        }
+        for c in comments
+    ]
+
+
 async def handle_task_tool(name: str, args: dict[str, Any], api: WeeekAPI, kb: WeeekKB | None = None) -> Any:
     if name == "weeek_whoami":
         return await api.whoami()
@@ -1020,6 +1071,11 @@ async def handle_task_tool(name: str, args: dict[str, Any], api: WeeekAPI, kb: W
         )
     if name == "weeek_get_task":
         return await api.get_task(args["task_id"])
+    if name == "weeek_list_task_comments":
+        return _comments_digest(await _require_kb(kb, "Reading comments").list_task_comments(args["task_id"]))
+    if name == "weeek_add_task_comment":
+        comment = await _require_kb(kb, "Commenting").add_task_comment(args["task_id"], args["text"])
+        return {"id": comment.get("id"), "text": _comment_text(comment)}
     if name == "weeek_list_custom_fields":
         fields = await project_custom_fields(api, args["project_id"])
         return [
