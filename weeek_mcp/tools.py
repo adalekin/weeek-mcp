@@ -764,6 +764,22 @@ TASK_TOOLS: list[types.Tool] = [
             "required": ["task_id", "text"],
         },
     ),
+    types.Tool(
+        name="weeek_update_task_comment",
+        description=(
+            "Rewrite one of your comments (Markdown), keeping it in place instead of posting a "
+            "correction after it. comment_id comes from weeek_list_task_comments."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "comment_id": {"type": "integer"},
+                "text": {"type": "string", "description": "New comment body as Markdown."},
+            },
+            "required": ["task_id", "comment_id", "text"],
+        },
+    ),
 ]
 
 KB_TOOLS: list[types.Tool] = [
@@ -1075,6 +1091,11 @@ async def handle_task_tool(name: str, args: dict[str, Any], api: WeeekAPI, kb: W
         return _comments_digest(await _require_kb(kb, "Reading comments").list_task_comments(args["task_id"]))
     if name == "weeek_add_task_comment":
         comment = await _require_kb(kb, "Commenting").add_task_comment(args["task_id"], args["text"])
+        return {"id": comment.get("id"), "text": _comment_text(comment)}
+    if name == "weeek_update_task_comment":
+        comment = await _require_kb(kb, "Editing a comment").update_task_comment(
+            args["task_id"], args["comment_id"], args["text"]
+        )
         return {"id": comment.get("id"), "text": _comment_text(comment)}
     if name == "weeek_list_custom_fields":
         fields = await project_custom_fields(api, args["project_id"])

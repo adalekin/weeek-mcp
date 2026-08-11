@@ -35,6 +35,10 @@ class FakeKB:
         self.posted.append((task_id, markdown))
         return _stored(markdown)
 
+    async def update_task_comment(self, task_id, comment_id, markdown):
+        self.posted.append((task_id, comment_id, markdown))
+        return _stored(markdown)
+
 
 @pytest.mark.asyncio
 async def test_list_task_comments_renders_the_document_as_text():
@@ -65,6 +69,21 @@ async def test_add_task_comment_passes_the_markdown_through():
 
     assert kb.posted == [(691, "не воспроизвелось")]
     assert result == {"id": 263, "text": "не воспроизвелось"}
+
+
+@pytest.mark.asyncio
+async def test_update_task_comment_rewrites_the_same_comment():
+    kb = FakeKB()
+
+    result = await tools.handle_task_tool(
+        "weeek_update_task_comment",
+        {"task_id": 691, "comment_id": 263, "text": "уточнение"},
+        api=None,
+        kb=kb,
+    )
+
+    assert kb.posted == [(691, 263, "уточнение")]
+    assert result == {"id": 263, "text": "уточнение"}
 
 
 @pytest.mark.asyncio

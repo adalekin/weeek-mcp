@@ -12,6 +12,7 @@ Endpoints (base ``{internal_api_base}/ws/{workspace_id}``):
   DELETE /kb/articles/{id}/avatar                              -> clear the icon
   GET /tm/tasks/{id}/comments                                  -> task comments
   POST /tm/tasks/{id}/comments {content}                       -> add one
+  PUT /tm/tasks/{id}/comments/{commentId} {content}            -> rewrite one
 
 Task comments live here rather than in the client for the public REST API because the public
 API has no route for them at all (``/tm/tasks/{id}/comments`` and every neighbouring spelling
@@ -530,6 +531,15 @@ class WeeekKB:
         ws = await self._workspace()
         data = await self._post(
             f"/ws/{ws}/tm/tasks/{task_id}/comments",
+            {"content": markdown_to_doc(markdown)},
+        )
+        return data.get("comment") or data
+
+    async def update_task_comment(self, task_id: int, comment_id: int, markdown: str) -> dict:
+        """Rewrite a comment in place, so the thread keeps one entry instead of gaining a second."""
+        ws = await self._workspace()
+        data = await self._put(
+            f"/ws/{ws}/tm/tasks/{task_id}/comments/{comment_id}",
             {"content": markdown_to_doc(markdown)},
         )
         return data.get("comment") or data
