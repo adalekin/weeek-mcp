@@ -132,7 +132,7 @@ def _block(node: dict) -> str:
 def _list_item(node: dict, depth: int) -> str:
     attrs = node.get("attrs") or {}
     kind = attrs.get("kind", "bullet")
-    if kind in ("check", "todo", "checkbox"):
+    if kind in ("task", "check", "todo", "checkbox"):
         marker = "- [x] " if attrs.get("checked") else "- [ ] "
     elif kind in ("number", "ordered"):
         marker = "1. "
@@ -221,7 +221,7 @@ def _inline_nodes(text: str) -> list[dict]:
         elif part.startswith("~~") and part.endswith("~~") and len(part) > 4:
             nodes.append({"type": "text", "text": part[2:-2], "marks": [{"type": "strike"}]})
         elif part.startswith("`") and part.endswith("`") and len(part) > 2:
-            nodes.append({"type": "text", "text": part[1:-1], "marks": [{"type": "code"}]})
+            nodes.append({"type": "text", "text": part[1:-1], "marks": [{"type": "inline-code"}]})
         elif part.startswith("!["):
             m = _IMAGE_RE.match(part)
             if m:
@@ -256,7 +256,16 @@ def _para(text: str) -> dict:
 
 
 def markdown_to_doc(md: str) -> dict:
-    """Convert a Markdown string to a Weeek ProseMirror ``doc`` node."""
+    """Convert a Markdown string to a Weeek ProseMirror ``doc`` node.
+
+    Node and mark names follow what Weeek's own editor writes, surveyed over 65 KB articles:
+    lists carry ``kind`` of ``bullet``/``ordered``/``task``, and inline code is the mark
+    ``inline-code``. Weeek rejects the names it does not know, but only after storing the
+    document, so a wrong name shows up as a comment that posts and then answers 500 (a bad
+    ``kind``) or 400 "Неверные данные" (a bad mark). The reading direction still accepts the
+    older ``number``/``check``/``code`` spellings, which sit in documents this module wrote
+    before the survey.
+    """
     lines = (md or "").replace("\r\n", "\n").split("\n")
     content: list[dict] = []
     i = 0
@@ -328,7 +337,7 @@ def markdown_to_doc(md: str) -> dict:
             depth = len(mc.group(1)) // 2
             node = {
                 "type": "list",
-                "attrs": {"kind": "check", "checked": mc.group(2).lower() == "x"},
+                "attrs": {"kind": "task", "checked": mc.group(2).lower() == "x"},
                 "content": [_para(mc.group(3))],
             }
             add_list_item(depth, node)
@@ -348,7 +357,7 @@ def markdown_to_doc(md: str) -> dict:
         if mn:
             flush_para()
             depth = len(mn.group(1)) // 2
-            node = {"type": "list", "attrs": {"kind": "number"}, "content": [_para(mn.group(2))]}
+            node = {"type": "list", "attrs": {"kind": "ordered"}, "content": [_para(mn.group(2))]}
             add_list_item(depth, node)
             i += 1
             continue

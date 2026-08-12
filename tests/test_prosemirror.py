@@ -156,10 +156,27 @@ def test_markdown_to_doc_inline_marks():
     assert marks_by_text["b"] == ["bold"]
     assert marks_by_text["c"] == ["italic"]
     assert marks_by_text["d"] == ["strike"]
-    assert marks_by_text["e"] == ["code"]
+    assert marks_by_text["e"] == ["inline-code"]
     assert marks_by_text["f"] == ["link"]
     link_node = next(n for n in nodes if n["text"] == "f")
     assert link_node["marks"][0]["attrs"]["href"] == "http://x"
+
+
+def test_markdown_to_doc_uses_the_names_weeek_accepts():
+    """Weeek stores a document with an unknown kind/mark and *then* errors on it.
+
+    The names below are the ones its own editor writes (surveyed across the KB): a wrong
+    ``kind`` answers 500 and a wrong mark answers 400, in both cases after the write.
+    """
+    doc = markdown_to_doc("1. first\n2. second\n\n- [x] done\n- plain\n\ntail `code`")
+    kinds = [n["attrs"]["kind"] for n in doc["content"] if n["type"] == "list"]
+    assert kinds == ["ordered", "ordered", "task", "bullet"]
+
+    tail = doc["content"][-1]["content"]
+    assert tail[-1]["marks"] == [{"type": "inline-code"}]
+
+    # Round-trips back to the same Markdown, so reading is not left behind by the rename.
+    assert to_markdown(doc) == "1. first\n1. second\n- [x] done\n- plain\n\ntail `code`"
 
 
 def test_markdown_to_doc_nested_list():
@@ -192,8 +209,11 @@ def test_markdown_to_doc_image_block():
 
 def test_markdown_to_html_extended():
     html = markdown_to_html("*i* ~~s~~ [l](http://x)\n\n- a\n  - a.1\n\n| A | B |\n| --- | --- |\n| 1 | 2 |")
-    assert '<em>i</em>' in html
-    assert '<s>s</s>' in html
+    assert "<em>i</em>" in html
+    assert "<s>s</s>" in html
     assert '<a href="http://x">l</a>' in html
-    assert '<ul><li>a<ul><li>a.1</li></ul></li></ul>' in html
-    assert '<table><tbody><tr><td><p>A</p></td><td><p>B</p></td></tr><tr><td><p>1</p></td><td><p>2</p></td></tr></tbody></table>' in html
+    assert "<ul><li>a<ul><li>a.1</li></ul></li></ul>" in html
+    assert (
+        "<table><tbody><tr><td><p>A</p></td><td><p>B</p></td></tr><tr><td><p>1</p></td><td><p>2</p></td></tr></tbody></table>"
+        in html
+    )
