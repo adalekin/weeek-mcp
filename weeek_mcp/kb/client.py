@@ -509,6 +509,7 @@ class WeeekKB:
             "tables": result["tables"],
             "changed": result["changed"],
             "content_width": result["available"],
+            "page": result.get("page"),
             "widths": stored,
         }
 

@@ -292,7 +292,23 @@ _MEASURE_TABLES_JS = (
     const pad = parseFloat(style.paddingLeft || '0') + parseFloat(style.paddingRight || '0');
     const available = Math.max(minWidth, Math.round((dom.clientWidth || fallbackWidth) - pad));
 
-    return {ok: true, tables, available};
+    // A table may be wider than the text: it overhangs the content column. How
+    // much wider is a property of the page, not of the editor, so the ancestor
+    // chain is reported and the caller picks the ceiling it wants.
+    const ancestors = [];
+    for (let el = dom.parentElement, i = 0; el && i < 8; el = el.parentElement, i++) {
+        const cs = getComputedStyle(el);
+        ancestors.push({
+            tag: el.tagName.toLowerCase(),
+            cls: (el.className || '').toString().slice(0, 60),
+            client: el.clientWidth,
+            scroll: el.scrollWidth,
+            overflowX: cs.overflowX,
+        });
+    }
+    const page = {viewport: window.innerWidth, editor: dom.clientWidth, ancestors};
+
+    return {ok: true, tables, available, page};
 }"""
 )
 
@@ -484,6 +500,7 @@ async def _apply_columns(page, selector: str, plan: list[dict | None]) -> dict:
         "tables": applied["tables"],
         "changed": applied["changed"],
         "available": available,
+        "page": measured.get("page"),
         "expected": [[c["width"] for c in cols] if cols else None for cols in columns],
     }
 
