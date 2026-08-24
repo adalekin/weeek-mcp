@@ -380,6 +380,26 @@ _APPLY_COLUMNS_JS = (
     });
     if (changed) view.dispatch(tr);
 
+    // The attribute alone loses: the extension recomputes it from the rendered
+    // table, so on a table the editor has already drawn our value is replaced by
+    // whatever the DOM says. The resizer works the other way round — it moves the
+    // markup and lets the attribute follow. So move the markup too.
+    const rendered = document.querySelector(selector).querySelectorAll('table');
+    const layout = [];
+    positions.forEach((_, i) => {
+        const table = rendered[i];
+        if (!table || !columns[i]) { layout.push(null); return; }
+        const widths = columns[i].map(c => c.width);
+        const group = table.querySelector('colgroup');
+        const cols = group ? group.querySelectorAll('col') : [];
+        cols.forEach((col, k) => { if (widths[k]) col.style.width = widths[k] + 'px'; });
+        const firstRow = table.querySelector('tr');
+        const cells = firstRow ? Array.from(firstRow.children) : [];
+        cells.forEach((cell, k) => { if (widths[k]) cell.style.width = widths[k] + 'px'; });
+        table.style.width = widths.reduce((a, b) => a + b, 0) + 'px';
+        layout.push({cols: cols.length, cells: cells.length, hasColgroup: !!group});
+    });
+
     // What the editor actually holds once the transaction has been applied.
     // A dispatch that "succeeded" and an attribute that survived it are two
     // different things: if the table extension recomputes columns of its own
@@ -390,7 +410,7 @@ _APPLY_COLUMNS_JS = (
         if (node.type.name === 'table_body') after.push(node.attrs.columns || null);
     });
     const stuck = positions.map((_, i) => (!columns[i] ? null : after[i] === JSON.stringify(columns[i])));
-    return {ok: true, tables: positions.length, changed, stuck, after};
+    return {ok: true, tables: positions.length, changed, stuck, after, layout};
 }"""
 )
 
@@ -581,6 +601,7 @@ async def _apply_columns(page, selector: str, plan: list[dict | None]) -> dict:
         "tables": applied["tables"],
         "changed": applied["changed"],
         "stuck": applied.get("stuck"),
+        "layout": applied.get("layout"),
         "editor_after": settled_in_editor.get("after"),
         "available": available,
         "page": measured.get("page"),

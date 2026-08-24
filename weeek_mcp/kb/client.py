@@ -524,6 +524,7 @@ class WeeekKB:
             "sizing": result.get("sizing"),
             "timings": result.get("timings"),
             "stuck": result.get("stuck"),
+            "layout": result.get("layout"),
             "widths": stored,
         }
 
