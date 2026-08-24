@@ -286,6 +286,36 @@ _MEASURE_TABLES_JS = (
         }
     });
 
+    // What each column would need in order not to wrap, measured in the real
+    // font: a clone of every cell is laid out off-screen with nowrap, and the
+    // widest one wins. Guessing this from character counts is not good enough —
+    // bold, links and emoji are all wider than a plain glyph.
+    const rendered = view.dom.querySelectorAll('table');
+    const probe = document.createElement('div');
+    probe.style.cssText = 'position:absolute;visibility:hidden;left:-99999px;top:0;white-space:nowrap;';
+    view.dom.parentElement.appendChild(probe);
+    rendered.forEach((table, i) => {
+        if (!tables[i]) return;
+        const natural = [], current = [];
+        const rows = table.querySelectorAll('tr');
+        rows.forEach(row => {
+            Array.from(row.children).forEach((cell, k) => {
+                const clone = cell.cloneNode(true);
+                clone.style.width = 'auto';
+                clone.style.maxWidth = 'none';
+                clone.style.whiteSpace = 'nowrap';
+                probe.appendChild(clone);
+                natural[k] = Math.max(natural[k] || 0, Math.ceil(clone.getBoundingClientRect().width));
+                probe.removeChild(clone);
+                if (current[k] === undefined) current[k] = Math.round(cell.getBoundingClientRect().width);
+            });
+        });
+        tables[i].natural = natural;
+        tables[i].current = current;
+        tables[i].wraps = natural.filter((w, k) => w > (current[k] || 0) + 1).length;
+    });
+    probe.remove();
+
     // The content column, measured rather than assumed: it is what "fit" means.
     const dom = view.dom;
     const style = getComputedStyle(dom);
@@ -489,6 +519,10 @@ async def _apply_columns(page, selector: str, plan: list[dict | None]) -> dict:
         raise KBAuthError(f"Could not read the tables: {measured.get('error', 'unknown reason')}.")
 
     tables = [MeasuredTable(columns=t["columns"], raw_columns=t.get("raw_columns")) for t in measured["tables"]]
+    sizing = [
+        {"columns": t["columns"], "natural": t.get("natural"), "current": t.get("current"), "wraps": t.get("wraps")}
+        for t in measured["tables"]
+    ]
     available = int(measured["available"])
     columns = resolve_columns(tables, plan, available)
 
@@ -501,6 +535,7 @@ async def _apply_columns(page, selector: str, plan: list[dict | None]) -> dict:
         "changed": applied["changed"],
         "available": available,
         "page": measured.get("page"),
+        "sizing": sizing,
         "expected": [[c["width"] for c in cols] if cols else None for cols in columns],
     }
 

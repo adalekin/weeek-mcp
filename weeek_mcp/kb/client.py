@@ -510,6 +510,7 @@ class WeeekKB:
             "changed": result["changed"],
             "content_width": result["available"],
             "page": result.get("page"),
+            "sizing": result.get("sizing"),
             "widths": stored,
         }
 
