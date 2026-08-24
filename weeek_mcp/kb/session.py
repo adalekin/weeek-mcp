@@ -33,6 +33,7 @@ _SETTLE_POLL_MS = 500  # how often the server is asked whether the sync arrived
 _APPLY_ATTEMPTS = 4  # a late reconciliation pass can undo the attribute; set it again
 _APPLY_RECHECK_MS = 2500  # long enough for that pass to have happened
 _APPLY_RETRY_MS = 1500  # breathing room before setting it once more
+_SCROLL_SETTLE_MS = 800  # let the editor finish reacting to the viewport move
 _SETTLE_TIMEOUT = 30.0  # the wait has to end inside the CALLER's timeout, not just ours: a
 # browser start costs ~15s and the transaction ~4s, so anything longer than this gets the whole
 # call killed from outside and the diagnosis never reaches whoever asked for the write
@@ -577,6 +578,15 @@ async def _apply_columns(page, selector: str, plan: list[dict | None]) -> dict:
     applied: dict = {}
     settled_in_editor: dict = {}
     for attempt in range(_APPLY_ATTEMPTS):
+        # The tables the editor is looking at are the ones it keeps rewriting, and
+        # at the top of a long document that is always the same few. Moving the
+        # viewport between attempts gives every table a turn while it is off
+        # screen, which is the only state in which the attribute has ever stuck.
+        await page.evaluate(
+            "(toBottom) => window.scrollTo(0, toBottom ? document.body.scrollHeight : 0)",
+            bool(attempt % 2),
+        )
+        await page.wait_for_timeout(_SCROLL_SETTLE_MS)
         applied = await page.evaluate(_APPLY_COLUMNS_JS, {"selector": selector, "columns": columns})
         if not applied.get("ok"):
             raise KBAuthError(f"Could not set table widths: {applied.get('error', 'unknown reason')}.")
