@@ -483,7 +483,18 @@ class WeeekKB:
             await self._refresh_session()
         tables = read_tables(await self._document_content(doc_id))
         plan = widths_plan(tables, table_index, widths, fit=fit)
-        result = await set_table_columns(self._cfg, ws, str(doc_id), plan)
+
+        async def settled(applied: list[list[int] | None] | None) -> bool:
+            """Whether Weeek itself now serves the widths the editor was given."""
+            if applied is None:
+                return True
+            current = [t.widths for t in read_tables(await self._document_content(doc_id))]
+            return all(want is None or (i < len(current) and current[i] == want) for i, want in enumerate(applied))
+
+        try:
+            result = await set_table_columns(self._cfg, ws, str(doc_id), plan, settled=settled)
+        except KBNotSettledError as exc:
+            raise KBError(str(exc)) from exc
 
         stored = [t.widths for t in read_tables(await self._document_content(doc_id))]
         expected: list[list[int] | None] = result["expected"]
@@ -491,8 +502,8 @@ class WeeekKB:
             if want is not None and (i >= len(stored) or stored[i] != want):
                 raise KBError(
                     f"Table {i} was set to {want} but Weeek now reports "
-                    f"{stored[i] if i < len(stored) else 'no such table'}. The editor syncs over a "
-                    "websocket, so a slow connection can drop the change; retry the same call."
+                    f"{stored[i] if i < len(stored) else 'no such table'}, even though the server "
+                    "confirmed the write. Something changed the table in between; re-read before retrying."
                 )
         return {
             "tables": result["tables"],

@@ -351,12 +351,22 @@ async def replace_article_content(
     )
 
 
-async def set_table_columns(cfg: Config, workspace_id: str, article_id: str, plan: list[dict | None]) -> dict:
-    """Set column widths on an article's tables without touching their content."""
+async def set_table_columns(
+    cfg: Config,
+    workspace_id: str,
+    article_id: str,
+    plan: list[dict | None],
+    settled: Settled | None = None,
+) -> dict:
+    """Set column widths on an article's tables without touching their content.
+
+    ``settled`` reports whether the server has the new widths; the page stays
+    open until it says yes.
+    """
     t0 = time.monotonic()
     try:
         return await asyncio.wait_for(
-            _size_tables(cfg, f"/ws/{workspace_id}/kb/{article_id}", plan), timeout=_EDIT_TIMEOUT
+            _size_tables(cfg, f"/ws/{workspace_id}/kb/{article_id}", plan, settled), timeout=_EDIT_TIMEOUT
         )
     except TimeoutError as exc:
         raise KBAuthError(
@@ -478,12 +488,19 @@ async def _apply_columns(page, selector: str, plan: list[dict | None]) -> dict:
     }
 
 
-async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None]) -> dict:
-    """Open the article headlessly and set column widths, leaving content alone."""
+async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None], settled: Settled | None = None) -> dict:
+    """Open the article headlessly and set column widths, leaving content alone.
+
+    The widths ride the same collaborative websocket as a body edit, so closing
+    the page before the sync lands throws them away — and on a long document
+    that is what happens every time, silently. ``settled`` asks the server.
+    """
     t0 = time.monotonic()
     async with _editor_page(cfg, page_path, _KB_EDITOR, "size tables") as (page, _editor, log):
         result = await _apply_columns(page, _KB_EDITOR, plan)
         log(f"size tables: {result['changed']}/{result['tables']} in {time.monotonic() - t0:.1f}s")
+        if settled is not None:
+            await _wait_until_settled(page, settled, result["expected"], "table widths", log)
         return result
 
 

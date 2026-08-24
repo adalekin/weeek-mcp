@@ -7,6 +7,8 @@ server itself; these tests cover the polling, what counts as written, and the
 error raised when the server never takes the edit.
 """
 
+import json
+
 import pytest
 
 from weeek_mcp.kb import client as kb_client
@@ -135,3 +137,59 @@ async def test_waiting_forever_is_not_an_option(monkeypatch):
     assert "Nothing was saved" in message
     # The caller has to know not to hammer it: a repeat can empty the document.
     assert "Do not retry blindly" in message
+
+
+# ------------------------------------------------------- widths ride the same channel
+
+TABLE = "| a | b |\n| --- | --- |\n| 1 | 2 |\n"
+
+
+def _with_widths(markdown, widths):
+    """The document as Weeek stores it once a table has been sized."""
+    doc = markdown_to_doc(markdown)
+
+    def walk(node):
+        if node.get("type") == "table_body":
+            node.setdefault("attrs", {})["columns"] = json.dumps(
+                [{"id": str(i), "width": w, "color": "", "backgroundColor": ""} for i, w in enumerate(widths)]
+            )
+        for child in node.get("content") or []:
+            if isinstance(child, dict):
+                walk(child)
+
+    walk(doc)
+    return doc
+
+
+async def test_widths_are_not_reported_before_weeek_serves_them(monkeypatch, tmp_path):
+    """Closing the page before the sync lands throws the widths away, silently.
+
+    On a short document the sync wins the race and the old code looked fine; on a
+    long one it lost every time, and the caller was told the table simply refused
+    the change.
+    """
+    state = tmp_path / "storage_state.json"
+    state.write_text("{}")
+
+    class Cfg:
+        storage_state_path = state
+
+    instance = WeeekKB.__new__(WeeekKB)
+    instance._cfg = Cfg()
+    served = {"doc": _with_widths(TABLE, [338, 338])}
+    monkeypatch.setattr(WeeekKB, "_workspace", lambda self: _done("923663"))
+    monkeypatch.setattr(WeeekKB, "_document_content", lambda self, doc_id: _done(served["doc"]))
+
+    answers = []
+
+    async def fake_size(cfg, ws, article_id, plan, settled=None):
+        answers.append(await settled([[104, 572]]))  # sync has not landed yet
+        served["doc"] = _with_widths(TABLE, [104, 572])
+        answers.append(await settled([[104, 572]]))  # now it has
+        return {"tables": 1, "changed": 1, "expected": [[104, 572]], "available": 676}
+
+    monkeypatch.setattr(kb_client, "set_table_columns", fake_size)
+    result = await instance.set_table_widths("24", table_index=0, widths=[104, 572])
+
+    assert answers == [False, True]
+    assert result["widths"] == [[104, 572]]
