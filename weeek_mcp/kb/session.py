@@ -30,7 +30,9 @@ Settled = Callable[[list[list[int] | None] | None], Awaitable[bool]]
 _LOGIN_TIMEOUT = 45.0  # hard ceiling so a stuck browser fails loudly instead of hanging
 _EDIT_TIMEOUT = 60.0  # a paste that also restores table widths waits on two syncs
 _SETTLE_POLL_MS = 500  # how often the server is asked whether the sync arrived
-_SETTLE_TIMEOUT = 40.0  # inside _EDIT_TIMEOUT, so the wait ends with a diagnosis, not a cancel
+_SETTLE_TIMEOUT = 30.0  # the wait has to end inside the CALLER's timeout, not just ours: a
+# browser start costs ~15s and the transaction ~4s, so anything longer than this gets the whole
+# call killed from outside and the diagnosis never reaches whoever asked for the write
 
 LOGIN_PATH = "/login"  # redirects to /welcome
 EMAIL_INPUT = "input[type='email'], input[name='email']"
@@ -637,10 +639,11 @@ async def _wait_until_settled(page, settled: Settled, widths, what: str, log) ->
             log(f"edit {what}: server never took the edit ({waited:.1f}s)")
             raise KBNotSettledError(
                 f"The {what} was written in the editor but Weeek still serves the previous version "
-                f"after {waited:.0f}s. Nothing was saved. Another live editing session is holding the "
-                "document — close it everywhere, or restart this connector to drop a stuck headless "
-                "page, then repeat the call. Do not retry blindly: a repeat while the document is held "
-                "can leave it empty."
+                f"after {waited:.0f}s and {polls} polls. Nothing was saved. The edit reached the "
+                "editor, so this is the collaborative sync not carrying it: the document may be held "
+                "by another live session, or this particular change may be one the server drops. "
+                "Re-read before doing anything else — and do not retry blindly, a repeat while the "
+                "document is held can leave it empty."
             )
         await page.wait_for_timeout(_SETTLE_POLL_MS)
     waited = time.monotonic() - t0

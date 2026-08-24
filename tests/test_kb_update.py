@@ -136,7 +136,9 @@ async def test_waiting_forever_is_not_an_option(monkeypatch):
     message = str(caught.value)
     assert "Nothing was saved" in message
     # The caller has to know not to hammer it: a repeat can empty the document.
-    assert "Do not retry blindly" in message
+    assert "do not retry blindly" in message
+    # And how long the wait ran, so the failure is a diagnosis and not a shrug.
+    assert "polls" in message
 
 
 # ------------------------------------------------------- widths ride the same channel
