@@ -527,8 +527,9 @@ class WeeekKB:
             if want is not None and (i >= len(stored) or stored[i] != want):
                 raise KBError(
                     f"Table {i} was set to {want} but Weeek now reports "
-                    f"{stored[i] if i < len(stored) else 'no such table'}, even though the server "
-                    "confirmed the write. Something changed the table in between; re-read before retrying."
+                    f"{stored[i] if i < len(stored) else 'no such table'}. "
+                    f"Handles dragged: {result.get('drags')}. "
+                    f"Attribute after the drags: {result.get('after_drag')}."
                 )
         return {
             "tables": result["tables"],

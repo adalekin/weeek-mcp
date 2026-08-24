@@ -733,6 +733,7 @@ async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None], set
         # fixed cost, and what is left of the client's timeout is the budget the
         # sync has to land in. Without these numbers a failure says nothing.
         result["drags"] = drags or None
+        result["after_drag"] = result.get("after_drag")
         result["timings"] = {
             "open_s": round(opened, 1),
             "apply_s": round(applied - opened, 1),
