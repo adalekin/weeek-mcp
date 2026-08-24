@@ -16,13 +16,21 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from ..config import Config
 from ..logging_util import make_logger
 
+# Asks the server whether it has the edit, given the column widths that were
+# applied (None when the edit set none). Supplied by the caller, which is the
+# side that knows what the document is supposed to look like.
+Settled = Callable[[list[list[int] | None] | None], Awaitable[bool]]
+
 _LOGIN_TIMEOUT = 45.0  # hard ceiling so a stuck browser fails loudly instead of hanging
 _EDIT_TIMEOUT = 60.0  # a paste that also restores table widths waits on two syncs
+_SETTLE_POLL_MS = 2000  # how often the server is asked whether the sync arrived
+_SETTLE_TIMEOUT = 40.0  # inside _EDIT_TIMEOUT, so the wait ends with a diagnosis, not a cancel
 
 LOGIN_PATH = "/login"  # redirects to /welcome
 EMAIL_INPUT = "input[type='email'], input[name='email']"
@@ -36,6 +44,17 @@ UNAUTH_MARKERS = ("/login", "/welcome", "/sign-up")
 
 class KBAuthError(RuntimeError):
     """Not logged in and unable to log in (missing credentials, 2FA, captcha, or SSO)."""
+
+
+class KBNotSettledError(RuntimeError):
+    """The edit was made in the editor but the server never served it back.
+
+    Weeek syncs the editor over a collaborative websocket. When another live
+    session holds the same document — a browser tab left open on it, or a stuck
+    headless page from an earlier call — that session keeps overwriting what we
+    type, and the document silently stays as it was. Nothing in the editor says
+    so, which is why the server is polled instead of trusted.
+    """
 
 
 def load_cookies_into(client, cfg: Config) -> int:
@@ -312,11 +331,14 @@ async def replace_article_content(
     article_id: str,
     html: str,
     columns_plan: list[dict | None] | None = None,
+    settled: Settled | None = None,
 ) -> None:
     """Replace a KB article's body in place by driving Weeek's own editor.
 
     ``columns_plan`` restores table column widths right after the replacement, in
     the same browser session — new markup always lands with default widths.
+    ``settled`` reports whether the server has the edit; the browser stays open
+    until it says yes.
     """
     await _replace_editor_content(
         cfg,
@@ -325,6 +347,7 @@ async def replace_article_content(
         what="document body",
         selector=_KB_EDITOR,
         columns_plan=columns_plan,
+        settled=settled,
     )
 
 
@@ -365,6 +388,7 @@ async def _replace_editor_content(
     what: str,
     selector: str,
     columns_plan: list[dict | None] | None = None,
+    settled: Settled | None = None,
 ) -> None:
     """Drive one of Weeek's collaborative editors to hold exactly ``html``.
 
@@ -373,7 +397,9 @@ async def _replace_editor_content(
     """
     t0 = time.monotonic()
     try:
-        await asyncio.wait_for(_edit(cfg, page_path, html, what, selector, columns_plan), timeout=_EDIT_TIMEOUT)
+        await asyncio.wait_for(
+            _edit(cfg, page_path, html, what, selector, columns_plan, settled), timeout=_EDIT_TIMEOUT
+        )
     except TimeoutError as exc:
         raise KBAuthError(
             f"Editing the {what} timed out after {_EDIT_TIMEOUT:.0f}s (stuck at {time.monotonic() - t0:.1f}s in)."
@@ -468,6 +494,7 @@ async def _edit(
     what: str,
     selector: str,
     columns_plan: list[dict | None] | None = None,
+    settled: Settled | None = None,
 ) -> None:
     """Open the page headlessly and make the editor ``selector`` points at hold ``html``.
 
@@ -476,6 +503,10 @@ async def _edit(
     The replacement runs as an editor transaction, falling back to the clipboard
     route only if the editor instance cannot be reached — that fallback cannot
     clear tables (see ``_REPLACE_CONTENT_JS``), so it is a last resort.
+
+    Closing the browser before the sync has reached the server throws the edit
+    away, and the editor gives no sign of it: ``settled`` asks the server itself,
+    and the page is held open until it answers yes.
     """
     t0 = time.monotonic()
     async with _editor_page(cfg, page_path, selector, f"edit {what}") as (page, editor, log):
@@ -494,9 +525,39 @@ async def _edit(
                 )
             log(f"edit {what}: transaction route unavailable ({replaced.get('error')}), using the clipboard")
             await _clipboard_replace(page, selector, html, what)
-        # Give the collaborative sync time to persist server-side.
-        await page.wait_for_timeout(5000)
+        widths: list[list[int] | None] | None = None
         if columns_plan:
+            # Both transactions travel the same channel, so they are dispatched
+            # together and waited on together.
             sized = await _apply_columns(page, selector, columns_plan)
+            widths = sized["expected"]
             log(f"edit {what}: sized {sized['changed']}/{sized['tables']} table(s)")
+        if settled is None:
+            # Give the collaborative sync time to persist server-side.
+            await page.wait_for_timeout(5000)
+        else:
+            await _wait_until_settled(page, settled, widths, what, log)
         log(f"edit {what}: done in {time.monotonic() - t0:.1f}s")
+
+
+async def _wait_until_settled(page, settled: Settled, widths, what: str, log) -> None:
+    """Hold the page open until the server reports the edit, or the caller times out.
+
+    The editor confirms nothing: a document that never reached the server reads
+    exactly like one that did. Polling the server is the only honest signal, and
+    the outer ``_EDIT_TIMEOUT`` bounds the wait.
+    """
+    t0 = time.monotonic()
+    while not await settled(widths):
+        waited = time.monotonic() - t0
+        if waited > _SETTLE_TIMEOUT:
+            log(f"edit {what}: server never took the edit ({waited:.1f}s)")
+            raise KBNotSettledError(
+                f"The {what} was written in the editor but Weeek still serves the previous version "
+                f"after {waited:.0f}s. Nothing was saved. Another live editing session is holding the "
+                "document — close it everywhere, or restart this connector to drop a stuck headless "
+                "page, then repeat the call. Do not retry blindly: a repeat while the document is held "
+                "can leave it empty."
+            )
+        await page.wait_for_timeout(_SETTLE_POLL_MS)
+    log(f"edit {what}: server has it after {time.monotonic() - t0:.1f}s")

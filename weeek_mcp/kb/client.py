@@ -48,7 +48,14 @@ import httpx
 from ..config import Config
 from ..logging_util import make_logger
 from .prosemirror import markdown_to_doc, markdown_to_html, to_markdown
-from .session import KBAuthError, automated_login, load_cookies_into, replace_article_content, set_table_columns
+from .session import (
+    KBAuthError,
+    KBNotSettledError,
+    automated_login,
+    load_cookies_into,
+    replace_article_content,
+    set_table_columns,
+)
 from .tables import carry_over_plan, read_tables, size_new_tables, widths_plan
 
 _PAGE_LIMIT = 200
@@ -437,7 +444,25 @@ class WeeekKB:
         before = read_tables(await self._document_content(doc_id))
         after = read_tables(markdown_to_doc(markdown))
         plan = carry_over_plan(before, after) if after else None
-        await replace_article_content(self._cfg, ws, str(doc_id), markdown_to_html(markdown), columns_plan=plan)
+        wanted = to_markdown(markdown_to_doc(markdown))
+
+        async def settled(widths: list[list[int] | None] | None) -> bool:
+            """Whether Weeek itself now serves the document that was written."""
+            doc = await self._document_content(doc_id)
+            if to_markdown(doc) != wanted:
+                return False
+            if widths is None:
+                return True
+            stored = [t.widths for t in read_tables(doc)]
+            return all(want is None or (i < len(stored) and stored[i] == want) for i, want in enumerate(widths))
+
+        try:
+            await replace_article_content(
+                self._cfg, ws, str(doc_id), markdown_to_html(markdown), columns_plan=plan, settled=settled
+            )
+        except KBNotSettledError as exc:
+            # Same failure the caller sees from set_table_widths, phrased once.
+            raise KBError(str(exc)) from exc
 
     async def set_table_widths(
         self,
