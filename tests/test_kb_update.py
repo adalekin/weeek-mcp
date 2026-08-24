@@ -66,7 +66,8 @@ async def test_the_write_is_not_reported_before_weeek_serves_it(kb, monkeypatch)
     assert answers == [False, True]
 
 
-async def test_column_widths_are_part_of_what_counts_as_written(kb, monkeypatch):
+async def test_the_body_is_confirmed_by_the_body_alone(kb, monkeypatch):
+    """Widths are not part of the condition: a body that arrived must not keep waiting."""
     instance, server = kb
     answers = []
 
@@ -77,7 +78,7 @@ async def test_column_widths_are_part_of_what_counts_as_written(kb, monkeypatch)
     monkeypatch.setattr(kb_client, "replace_article_content", fake_replace)
     await instance.update_content("24", NEW)
 
-    assert answers == [False]
+    assert answers == [True]
 
 
 async def test_a_held_document_reaches_the_caller_as_a_kb_error(kb, monkeypatch):
@@ -228,7 +229,8 @@ async def test_explicit_widths_ride_with_the_body(monkeypatch, kb):
         captured["plan"] = columns_plan
 
     monkeypatch.setattr(kb_client, "replace_article_content", fake_replace)
-    await instance.update_content("24", NEW + "\n" + TABLE, table_widths=[[104, 572]])
+    with pytest.raises(KBError, match=r"table\(s\) \[0\] kept their old widths"):
+        await instance.update_content("24", NEW + "\n" + TABLE, table_widths=[[104, 572]])
 
     assert captured["plan"] == [{"mode": "widths", "widths": [104, 572]}]
 

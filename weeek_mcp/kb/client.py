@@ -465,14 +465,16 @@ class WeeekKB:
         wanted = to_markdown(markdown_to_doc(markdown))
 
         async def settled(widths: list[list[int] | None] | None) -> bool:
-            """Whether Weeek itself now serves the document that was written."""
+            """Whether Weeek itself now serves the body that was written.
+
+            Only the body. Widths used to be part of this condition, and that was
+            wrong twice over: a body that had arrived would keep waiting on widths
+            that never would, and the failure was reported against the body. They
+            are checked after, and a width that did not take is worth saying so
+            without pretending the body was lost.
+            """
             doc = await self._document_content(doc_id)
-            if to_markdown(doc) != wanted:
-                return False
-            if widths is None:
-                return True
-            stored = [t.widths for t in read_tables(doc)]
-            return all(want is None or (i < len(stored) and stored[i] == want) for i, want in enumerate(widths))
+            return to_markdown(doc) == wanted
 
         try:
             await replace_article_content(
@@ -481,6 +483,18 @@ class WeeekKB:
         except KBNotSettledError as exc:
             # Same failure the caller sees from set_table_widths, phrased once.
             raise KBError(str(exc)) from exc
+        if table_widths is not None:
+            stored = [t.widths for t in read_tables(await self._document_content(doc_id))]
+            missed = [
+                i
+                for i, want in enumerate(table_widths)
+                if want is not None and (i >= len(stored) or stored[i] != list(want))
+            ]
+            if missed:
+                raise KBError(
+                    f"The body was written, but table(s) {missed} kept their old widths. "
+                    "The body is safe — only the sizing did not take."
+                )
 
     async def set_table_widths(
         self,
