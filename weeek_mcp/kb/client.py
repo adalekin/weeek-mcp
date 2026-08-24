@@ -539,7 +539,6 @@ class WeeekKB:
             "timings": result.get("timings"),
             "stuck": result.get("stuck"),
             "layout": result.get("layout"),
-            "cell_widths": result.get("cell_widths"),
             "widths": stored,
         }
 

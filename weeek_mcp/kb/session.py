@@ -372,41 +372,11 @@ _APPLY_COLUMNS_JS = (
         return {ok: false, error: 'the document changed while it was being resized'};
     }
 
-    // What the cells themselves carry. In stock ProseMirror the width of a column
-    // lives here, as colwidth on every cell, and the resizing plugin rebuilds
-    // anything else from it — which would make the table_body attribute a
-    // derived value and explain why setting it alone gets overwritten.
-    const cellWidths = [];
-    positions.forEach((pos) => {
-        const body = view.state.doc.nodeAt(pos);
-        const row = body && body.firstChild;
-        const found = [];
-        if (row) row.forEach(cell => found.push((cell.attrs && cell.attrs.colwidth) || null));
-        cellWidths.push(found);
-    });
-
     let tr = view.state.tr;
     let changed = 0;
     positions.forEach((pos, i) => {
         if (!columns[i]) return;
         tr = tr.setNodeAttribute(pos, 'columns', JSON.stringify(columns[i]));
-        // And the cells, which is where the resizer actually writes.
-        const widths = columns[i].map(c => c.width);
-        const body = view.state.doc.nodeAt(pos);
-        if (body) {
-            body.forEach((row, rowOffset) => {
-                let k = 0;
-                row.forEach((cell, cellOffset) => {
-                    const span = (cell.attrs && cell.attrs.colspan) || 1;
-                    const take = widths.slice(k, k + span);
-                    if (take.length) {
-                        const cellPos = pos + 1 + rowOffset + 1 + cellOffset;
-                        tr = tr.setNodeMarkup(cellPos, undefined, {...cell.attrs, colwidth: take});
-                    }
-                    k += span;
-                });
-            });
-        }
         changed++;
     });
     if (changed) view.dispatch(tr);
@@ -415,20 +385,17 @@ _APPLY_COLUMNS_JS = (
     // table, so on a table the editor has already drawn our value is replaced by
     // whatever the DOM says. The resizer works the other way round — it moves the
     // markup and lets the attribute follow. So move the markup too.
+    // The colgroup is a ProseMirror widget the plugin redraws from the attribute,
+    // so touching it changes nothing that lasts. Reported, not written to.
     const rendered = document.querySelector(selector).querySelectorAll('table');
     const layout = [];
-    positions.forEach((_, i) => {
-        const table = rendered[i];
-        if (!table || !columns[i]) { layout.push(null); return; }
-        const widths = columns[i].map(c => c.width);
-        const group = table.querySelector('colgroup');
-        const cols = group ? group.querySelectorAll('col') : [];
-        cols.forEach((col, k) => { if (widths[k]) col.style.width = widths[k] + 'px'; });
-        const firstRow = table.querySelector('tr');
-        const cells = firstRow ? Array.from(firstRow.children) : [];
-        cells.forEach((cell, k) => { if (widths[k]) cell.style.width = widths[k] + 'px'; });
-        table.style.width = widths.reduce((a, b) => a + b, 0) + 'px';
-        layout.push({cols: cols.length, cells: cells.length, hasColgroup: !!group});
+    rendered.forEach((table) => {
+        const node = table.closest('.table-node');
+        layout.push({
+            margin: node ? getComputedStyle(node).marginLeft : null,
+            cols: table.querySelectorAll('colgroup col').length,
+            widths: Array.from(table.querySelectorAll('colgroup col')).map(c => c.style.width),
+        });
     });
 
     // What the editor actually holds once the transaction has been applied.
@@ -440,8 +407,17 @@ _APPLY_COLUMNS_JS = (
     view.state.doc.descendants((node) => {
         if (node.type.name === 'table_body') after.push(node.attrs.columns || null);
     });
-    const stuck = positions.map((_, i) => (!columns[i] ? null : after[i] === JSON.stringify(columns[i])));
-    return {ok: true, tables: positions.length, changed, stuck, after, layout, cellWidths};
+    // Compare the widths, not the text: the plugin rebuilds the same object with
+    // its own key order and its own extra fields, and a string comparison then
+    // reports a change that landed perfectly well as discarded.
+    const widthsOf = (raw) => {
+        try { return (JSON.parse(raw) || []).map(e => e && e.width); } catch (e) { return null; }
+    };
+    const same = (a, b) => a && b && a.length === b.length && a.every((v, k) => v === b[k]);
+    const stuck = positions.map((_, i) =>
+        !columns[i] ? null : same(widthsOf(after[i]), columns[i].map(c => c.width))
+    );
+    return {ok: true, tables: positions.length, changed, stuck, after, layout};
 }"""
 )
 
@@ -642,7 +618,6 @@ async def _apply_columns(page, selector: str, plan: list[dict | None]) -> dict:
         "changed": applied["changed"],
         "stuck": applied.get("stuck"),
         "layout": applied.get("layout"),
-        "cell_widths": applied.get("cellWidths"),
         "editor_after": settled_in_editor.get("after"),
         "available": available,
         "page": measured.get("page"),
