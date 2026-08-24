@@ -34,6 +34,7 @@ _APPLY_ATTEMPTS = 4  # a late reconciliation pass can undo the attribute; set it
 _APPLY_RECHECK_MS = 2500  # long enough for that pass to have happened
 _APPLY_RETRY_MS = 1500  # breathing room before setting it once more
 _SCROLL_SETTLE_MS = 800  # let the editor finish reacting to the viewport move
+_DRAG_SETTLE_MS = 600  # let the plugin write the attribute after a handle is dropped
 _SETTLE_TIMEOUT = 30.0  # the wait has to end inside the CALLER's timeout, not just ours: a
 # browser start costs ~15s and the transaction ~4s, so anything longer than this gets the whole
 # call killed from outside and the diagnosis never reaches whoever asked for the write
@@ -422,6 +423,30 @@ _APPLY_COLUMNS_JS = (
 )
 
 
+# The resize handles are real elements the plugin listens on: `left` gives where
+# each column boundary sits. Reported with page coordinates so the mouse can be
+# driven to them, which is the one route the plugin treats as authoritative.
+_HANDLES_JS = (
+    """({selector, index}) => {"""
+    + _FIND_EDITOR_JS
+    + """
+    const editor = findEditor(selector);
+    const commands = editor && editor.commands ? Object.keys(editor.commands) : [];
+    const tables = document.querySelector(selector).querySelectorAll('table');
+    const table = tables[index];
+    if (!table) return {ok: false, error: 'no such table', commands};
+    const node = table.closest('.table-node') || table;
+    node.scrollIntoView({block: 'center'});
+    const handles = Array.from(node.querySelectorAll('.table__widget-columns-resizer')).map(h => {
+        const r = h.getBoundingClientRect();
+        return {x: r.x + r.width / 2, y: r.y + r.height / 2, height: r.height};
+    });
+    const body = table.getBoundingClientRect();
+    return {ok: true, handles, left: body.x, top: body.y, height: body.height, commands};
+}"""
+)
+
+
 async def replace_article_content(
     cfg: Config,
     workspace_id: str,
@@ -626,6 +651,42 @@ async def _apply_columns(page, selector: str, plan: list[dict | None]) -> dict:
     }
 
 
+async def _drag_columns(page, selector: str, index: int, widths: list[int], log) -> dict:
+    """Resize a table the way a person does: by dragging its handles.
+
+    Writing the attribute is the wrong end of the lever — the plugin owns it and
+    recomputes it from the layout for any table it has already laid out. The
+    handles are what the plugin itself listens on, so a real drag is the only
+    instruction it treats as coming from the document's owner.
+    """
+    report = await page.evaluate(_HANDLES_JS, {"selector": selector, "index": index})
+    if not report.get("ok"):
+        return {"dragged": 0, "error": report.get("error"), "commands": report.get("commands")}
+    await page.wait_for_timeout(400)
+
+    dragged = 0
+    for k in range(len(widths) - 1):
+        report = await page.evaluate(_HANDLES_JS, {"selector": selector, "index": index})
+        handles = report.get("handles") or []
+        if k >= len(handles):
+            break
+        handle = handles[k]
+        target = report["left"] + sum(widths[: k + 1])
+        if abs(handle["x"] - target) < 2:
+            continue
+        await page.mouse.move(handle["x"], handle["y"])
+        await page.mouse.down()
+        # A couple of intermediate moves: a single jump can miss a handler that
+        # only starts tracking after the pointer has actually moved.
+        await page.mouse.move((handle["x"] + target) / 2, handle["y"], steps=4)
+        await page.mouse.move(target, handle["y"], steps=4)
+        await page.mouse.up()
+        await page.wait_for_timeout(_DRAG_SETTLE_MS)
+        dragged += 1
+    log(f"drag columns: table {index}, {dragged} handle(s) moved")
+    return {"dragged": dragged, "commands": report.get("commands")}
+
+
 async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None], settled: Settled | None = None) -> dict:
     """Open the article headlessly and set column widths, leaving content alone.
 
@@ -640,8 +701,20 @@ async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None], set
         applied = time.monotonic() - t0
         log(f"size tables: {result['changed']}/{result['tables']} in {applied:.1f}s")
         stuck = result.get("stuck") or []
+        drags = []
         if False in stuck:
-            log(f"size tables: the editor discarded the attribute ({stuck})")
+            # The plugin put its own widths back. Ask it the way it expects to be
+            # asked: drag the handles it listens on, one boundary at a time.
+            log(f"size tables: attribute did not hold ({stuck}), dragging the handles")
+            expected = result.get("expected") or []
+            for i, held in enumerate(stuck):
+                if held is not False or i >= len(expected) or not expected[i]:
+                    continue
+                drags.append(await _drag_columns(page, _KB_EDITOR, i, list(expected[i]), log))
+            recheck = await page.evaluate(_APPLY_COLUMNS_JS, {"selector": _KB_EDITOR, "columns": [None] * len(stuck)})
+            result["after_drag"] = recheck.get("after")
+            result["drags"] = drags
+        if False in stuck and not drags:
             raise KBEditDiscardedError(
                 "The editor accepted the width transaction and then discarded it: the attribute is "
                 f"no longer on the table afterwards (stuck={stuck}). Nothing reached the sync, so the "
@@ -659,6 +732,7 @@ async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None], set
         # Where the time goes, reported to the caller: the browser start is a
         # fixed cost, and what is left of the client's timeout is the budget the
         # sync has to land in. Without these numbers a failure says nothing.
+        result["drags"] = drags or None
         result["timings"] = {
             "open_s": round(opened, 1),
             "apply_s": round(applied - opened, 1),
