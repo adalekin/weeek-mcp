@@ -76,3 +76,17 @@ def test_no_type_arrays_in_input_schemas():
         for offender in _type_array_paths(tool.inputSchema, tool.name)
     ]
     assert offenders == []
+
+
+def test_table_widths_survive_a_client_that_flattens_nested_arrays():
+    """Some clients hand the value over as its JSON text; that has to still work."""
+    from weeek_mcp.tools import _table_widths
+
+    assert _table_widths([[126, 365], None]) == [[126, 365], None]
+    assert _table_widths("[[126, 365], null]") == [[126, 365], None]
+    assert _table_widths(None) is None
+
+    with pytest.raises(ValueError, match="valid JSON"):
+        _table_widths("[[126, 365")
+    with pytest.raises(ValueError, match="one entry per table"):
+        _table_widths('{"0": [126, 365]}')

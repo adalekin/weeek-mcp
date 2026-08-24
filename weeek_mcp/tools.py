@@ -23,6 +23,7 @@ Defaulting turns "rename this project" into "rename it and make it public".
 from __future__ import annotations
 
 import html
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,19 @@ def _nullable(type_: str) -> dict[str, Any]:
     per property drops the list form, and the untyped value then reaches this server as a string.
     """
     return {"anyOf": [{"type": type_}, {"type": "null"}]}
+
+
+def _table_widths(value: Any) -> Any:
+    """Accept the widths as a list of lists, or as the JSON text of one."""
+    if not isinstance(value, str):
+        return value
+    try:
+        parsed = json.loads(value)
+    except ValueError as exc:
+        raise ValueError(f"table_widths is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, list):
+        raise ValueError("table_widths must be a list with one entry per table.")
+    return parsed
 
 
 def _priority(value: Any) -> Any:
@@ -909,16 +923,26 @@ KB_TOOLS: list[types.Tool] = [
                     ),
                 },
                 "table_widths": {
-                    "type": "array",
-                    "items": {
-                        "anyOf": [
-                            {"type": "array", "items": {"type": "integer"}},
-                            {"type": "null"},
-                        ]
-                    },
+                    "anyOf": [
+                        {
+                            "type": "array",
+                            "items": {
+                                "anyOf": [
+                                    {"type": "array", "items": {"type": "integer"}},
+                                    {"type": "null"},
+                                ]
+                            },
+                        },
+                        # Nested arrays do not survive every client: some flatten the
+                        # value to its JSON text. Accepting that text keeps the tool
+                        # usable instead of failing validation on the way in.
+                        {"type": "string"},
+                    ],
                     "description": (
                         "Column widths to give the new body's tables, one list per table in "
-                        "document order, null to carry over what that table had. Setting widths "
+                        "document order, null to carry over what that table had — e.g. "
+                        "[[126, 365, 431, 118], null]. The same value as a JSON string is "
+                        "accepted, for clients that cannot carry nested arrays. Setting widths "
                         "here rather than with weeek_kb_table_widths is the reliable route: the "
                         "tables are rebuilt by the replacement, so the widths land with them."
                     ),
@@ -1525,7 +1549,9 @@ async def handle_kb_tool(name: str, args: dict[str, Any], kb: WeeekKB) -> Any:
             await kb.rename_document(args["doc_id"], args["title"])
             actions.append("renamed")
         if args.get("content_markdown") is not None:
-            await kb.update_content(args["doc_id"], args["content_markdown"], table_widths=args.get("table_widths"))
+            await kb.update_content(
+                args["doc_id"], args["content_markdown"], table_widths=_table_widths(args.get("table_widths"))
+            )
             actions.append("content replaced")
         elif args.get("table_widths") is not None:
             raise ValueError("table_widths only applies together with content_markdown.")
