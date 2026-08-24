@@ -163,12 +163,12 @@ def _with_widths(markdown, widths):
     return doc
 
 
-async def test_widths_are_not_reported_before_weeek_serves_them(monkeypatch, tmp_path):
-    """Closing the page before the sync lands throws the widths away, silently.
+async def test_widths_are_checked_after_the_page_is_gone(monkeypatch, tmp_path):
+    """The widths path must not hold the page open waiting on the server.
 
-    On a short document the sync wins the race and the old code looked fine; on a
-    long one it lost every time, and the caller was told the table simply refused
-    the change.
+    Holding it is what breaks this write: the widths reach the server within
+    seconds and are reverted while the page is still open, so the poll never
+    sees them. The body path waits; this one closes and then verifies.
     """
     state = tmp_path / "storage_state.json"
     state.write_text("{}")
@@ -182,19 +182,41 @@ async def test_widths_are_not_reported_before_weeek_serves_them(monkeypatch, tmp
     monkeypatch.setattr(WeeekKB, "_workspace", lambda self: _done("923663"))
     monkeypatch.setattr(WeeekKB, "_document_content", lambda self, doc_id: _done(served["doc"]))
 
-    answers = []
+    seen = {}
 
     async def fake_size(cfg, ws, article_id, plan, settled=None):
-        answers.append(await settled([[104, 572]]))  # sync has not landed yet
-        served["doc"] = _with_widths(TABLE, [104, 572])
-        answers.append(await settled([[104, 572]]))  # now it has
+        seen["settled"] = settled
+        served["doc"] = _with_widths(TABLE, [104, 572])  # the sync lands, page closes
         return {"tables": 1, "changed": 1, "expected": [[104, 572]], "available": 676}
 
     monkeypatch.setattr(kb_client, "set_table_columns", fake_size)
     result = await instance.set_table_widths("24", table_index=0, widths=[104, 572])
 
-    assert answers == [False, True]
+    assert seen["settled"] is None, "the widths path must not wait with the page open"
     assert result["widths"] == [[104, 572]]
+
+
+async def test_widths_that_never_arrive_are_still_reported(monkeypatch, tmp_path):
+    """Not waiting is not the same as not checking: the read-back still has to fail."""
+    state = tmp_path / "storage_state.json"
+    state.write_text("{}")
+
+    class Cfg:
+        storage_state_path = state
+
+    instance = WeeekKB.__new__(WeeekKB)
+    instance._cfg = Cfg()
+    served = {"doc": _with_widths(TABLE, [338, 338])}
+    monkeypatch.setattr(WeeekKB, "_workspace", lambda self: _done("923663"))
+    monkeypatch.setattr(WeeekKB, "_document_content", lambda self, doc_id: _done(served["doc"]))
+
+    async def fake_size(cfg, ws, article_id, plan, settled=None):
+        return {"tables": 1, "changed": 1, "expected": [[104, 572]], "available": 676}
+
+    monkeypatch.setattr(kb_client, "set_table_columns", fake_size)
+
+    with pytest.raises(KBError, match="Weeek now reports"):
+        await instance.set_table_widths("24", table_index=0, widths=[104, 572])
 
 
 async def test_explicit_widths_ride_with_the_body(monkeypatch, kb):

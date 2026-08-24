@@ -502,16 +502,9 @@ class WeeekKB:
         tables = read_tables(await self._document_content(doc_id))
         plan = widths_plan(tables, table_index, widths, fit=fit)
 
-        async def settled(applied: list[list[int] | None] | None) -> bool:
-            """Whether Weeek itself now serves the widths the editor was given."""
-            if applied is None:
-                return True
-            current = [t.widths for t in read_tables(await self._document_content(doc_id))]
-            return all(want is None or (i < len(current) and current[i] == want) for i, want in enumerate(applied))
-
         try:
-            result = await set_table_columns(self._cfg, ws, str(doc_id), plan, settled=settled)
-        except (KBNotSettledError, KBEditDiscardedError) as exc:
+            result = await set_table_columns(self._cfg, ws, str(doc_id), plan)
+        except KBEditDiscardedError as exc:
             raise KBError(str(exc)) from exc
 
         stored = [t.widths for t in read_tables(await self._document_content(doc_id))]

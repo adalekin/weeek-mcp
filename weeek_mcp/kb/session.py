@@ -590,9 +590,14 @@ async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None], set
                 "server serving the old widths is correct and no one is holding the document. "
                 "Retrying will not help — the table extension is overwriting the widths."
             )
+        # Deliberately NOT waiting on the server here, unlike the body path.
+        # Holding the page open past the sync is what breaks this write: the
+        # widths reach the server within seconds and are then reverted while we
+        # are still watching, so the poll never sees them and the page closes on
+        # a document the editor has already put back. Tables that wrote fine
+        # before this wait existed stopped writing the moment it was added.
+        # The verification happens in the client after the page is gone.
         waited = {}
-        if settled is not None:
-            waited = await _wait_until_settled(page, settled, result["expected"], "table widths", log)
         # Where the time goes, reported to the caller: the browser start is a
         # fixed cost, and what is left of the client's timeout is the budget the
         # sync has to land in. Without these numbers a failure says nothing.
