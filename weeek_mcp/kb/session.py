@@ -48,6 +48,14 @@ class KBAuthError(RuntimeError):
     """Not logged in and unable to log in (missing credentials, 2FA, captcha, or SSO)."""
 
 
+class KBEditDiscardedError(RuntimeError):
+    """The editor took the transaction and then undid it.
+
+    Nothing reaches the collaborative channel in that case, so waiting on the
+    server would only spend the caller's timeout to reach the same conclusion.
+    """
+
+
 class KBNotSettledError(RuntimeError):
     """The edit was made in the editor but the server never served it back.
 
@@ -368,7 +376,18 @@ _APPLY_COLUMNS_JS = (
         changed++;
     });
     if (changed) view.dispatch(tr);
-    return {ok: true, tables: positions.length, changed};
+
+    // What the editor actually holds once the transaction has been applied.
+    // A dispatch that "succeeded" and an attribute that survived it are two
+    // different things: if the table extension recomputes columns of its own
+    // accord, ours is gone before the sync ever sees it, and the server is
+    // right to keep serving the old widths.
+    const after = [];
+    view.state.doc.descendants((node) => {
+        if (node.type.name === 'table_body') after.push(node.attrs.columns || null);
+    });
+    const stuck = positions.map((_, i) => (!columns[i] ? null : after[i] === JSON.stringify(columns[i])));
+    return {ok: true, tables: positions.length, changed, stuck, after};
 }"""
 )
 
@@ -532,9 +551,16 @@ async def _apply_columns(page, selector: str, plan: list[dict | None]) -> dict:
     if not applied.get("ok"):
         raise KBAuthError(f"Could not set table widths: {applied.get('error', 'unknown reason')}.")
     await page.wait_for_timeout(4000)
+    # Ask again after the editor has had time to react: an extension that undoes
+    # the attribute does it on its own schedule, not inside our dispatch.
+    settled_in_editor: dict = await page.evaluate(
+        _APPLY_COLUMNS_JS, {"selector": selector, "columns": [None] * len(columns)}
+    )
     return {
         "tables": applied["tables"],
         "changed": applied["changed"],
+        "stuck": applied.get("stuck"),
+        "editor_after": settled_in_editor.get("after"),
         "available": available,
         "page": measured.get("page"),
         "sizing": sizing,
@@ -555,6 +581,15 @@ async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None], set
         result = await _apply_columns(page, _KB_EDITOR, plan)
         applied = time.monotonic() - t0
         log(f"size tables: {result['changed']}/{result['tables']} in {applied:.1f}s")
+        stuck = result.get("stuck") or []
+        if False in stuck:
+            log(f"size tables: the editor discarded the attribute ({stuck})")
+            raise KBEditDiscardedError(
+                "The editor accepted the width transaction and then discarded it: the attribute is "
+                f"no longer on the table afterwards (stuck={stuck}). Nothing reached the sync, so the "
+                "server serving the old widths is correct and no one is holding the document. "
+                "Retrying will not help — the table extension is overwriting the widths."
+            )
         waited = {}
         if settled is not None:
             waited = await _wait_until_settled(page, settled, result["expected"], "table widths", log)

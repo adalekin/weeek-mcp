@@ -50,6 +50,7 @@ from ..logging_util import make_logger
 from .prosemirror import markdown_to_doc, markdown_to_html, to_markdown
 from .session import (
     KBAuthError,
+    KBEditDiscardedError,
     KBNotSettledError,
     automated_login,
     load_cookies_into,
@@ -493,7 +494,7 @@ class WeeekKB:
 
         try:
             result = await set_table_columns(self._cfg, ws, str(doc_id), plan, settled=settled)
-        except KBNotSettledError as exc:
+        except (KBNotSettledError, KBEditDiscardedError) as exc:
             raise KBError(str(exc)) from exc
 
         stored = [t.widths for t in read_tables(await self._document_content(doc_id))]
@@ -512,6 +513,7 @@ class WeeekKB:
             "page": result.get("page"),
             "sizing": result.get("sizing"),
             "timings": result.get("timings"),
+            "stuck": result.get("stuck"),
             "widths": stored,
         }
 
