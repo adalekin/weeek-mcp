@@ -908,6 +908,21 @@ KB_TOOLS: list[types.Tool] = [
                         "remove the current icon."
                     ),
                 },
+                "table_widths": {
+                    "type": "array",
+                    "items": {
+                        "anyOf": [
+                            {"type": "array", "items": {"type": "integer"}},
+                            {"type": "null"},
+                        ]
+                    },
+                    "description": (
+                        "Column widths to give the new body's tables, one list per table in "
+                        "document order, null to carry over what that table had. Setting widths "
+                        "here rather than with weeek_kb_table_widths is the reliable route: the "
+                        "tables are rebuilt by the replacement, so the widths land with them."
+                    ),
+                },
             },
             "required": ["doc_id"],
         },
@@ -1510,8 +1525,10 @@ async def handle_kb_tool(name: str, args: dict[str, Any], kb: WeeekKB) -> Any:
             await kb.rename_document(args["doc_id"], args["title"])
             actions.append("renamed")
         if args.get("content_markdown") is not None:
-            await kb.update_content(args["doc_id"], args["content_markdown"])
+            await kb.update_content(args["doc_id"], args["content_markdown"], table_widths=args.get("table_widths"))
             actions.append("content replaced")
+        elif args.get("table_widths") is not None:
+            raise ValueError("table_widths only applies together with content_markdown.")
         if "icon" in args:
             label = await kb.set_icon(args["doc_id"], args["icon"])
             actions.append(f"icon set to {label}" if label else "icon cleared")

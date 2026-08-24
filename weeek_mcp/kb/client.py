@@ -430,7 +430,9 @@ class WeeekKB:
             raise KBError(f"Document {doc_id!r} not found.")
         return (article.get("content") or {}).get("data") or {}
 
-    async def update_content(self, doc_id: str, markdown: str) -> None:
+    async def update_content(
+        self, doc_id: str, markdown: str, table_widths: list[list[int] | None] | None = None
+    ) -> None:
         """Replace a document's body in place via Weeek's editor (collaborative sync).
 
         Column widths do not survive the paste — the editor's table_body spec
@@ -445,6 +447,21 @@ class WeeekKB:
         before = read_tables(await self._document_content(doc_id))
         after = read_tables(markdown_to_doc(markdown))
         plan = carry_over_plan(before, after) if after else None
+        if table_widths is not None and plan is not None:
+            # Explicit widths beat carrying the old ones over. They ride with the
+            # body because that is the write this document actually takes: setting
+            # them afterwards on an existing table is what Weeek refuses to sync.
+            if len(table_widths) != len(plan):
+                raise KBError(
+                    f"The new body has {len(plan)} table(s) but {len(table_widths)} width list(s) "
+                    "were given. Pass one entry per table, or null to keep what a table had."
+                )
+            for i, want in enumerate(table_widths):
+                if want is None:
+                    continue
+                if len(want) != after[i].columns:
+                    raise KBError(f"Table {i} has {after[i].columns} column(s), got {len(want)} width(s).")
+                plan[i] = {"mode": "widths", "widths": list(want)}
         wanted = to_markdown(markdown_to_doc(markdown))
 
         async def settled(widths: list[list[int] | None] | None) -> bool:

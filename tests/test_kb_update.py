@@ -195,3 +195,33 @@ async def test_widths_are_not_reported_before_weeek_serves_them(monkeypatch, tmp
 
     assert answers == [False, True]
     assert result["widths"] == [[104, 572]]
+
+
+async def test_explicit_widths_ride_with_the_body(monkeypatch, kb):
+    """Widths given with the body replace the carry-over, one entry per table."""
+    instance, _server = kb
+    captured = {}
+
+    async def fake_replace(cfg, ws, article_id, html, columns_plan=None, settled=None):
+        captured["plan"] = columns_plan
+
+    monkeypatch.setattr(kb_client, "replace_article_content", fake_replace)
+    await instance.update_content("24", NEW + "\n" + TABLE, table_widths=[[104, 572]])
+
+    assert captured["plan"] == [{"mode": "widths", "widths": [104, 572]}]
+
+
+async def test_a_width_list_per_table_is_required(monkeypatch, kb):
+    """A miscounted list would silently size the wrong table, so it is refused."""
+    instance, _server = kb
+
+    async def fake_replace(cfg, ws, article_id, html, columns_plan=None, settled=None):
+        raise AssertionError("must not reach the browser")
+
+    monkeypatch.setattr(kb_client, "replace_article_content", fake_replace)
+
+    with pytest.raises(KBError, match="1 table"):
+        await instance.update_content("24", NEW + "\n" + TABLE, table_widths=[[104, 572], [90, 90]])
+
+    with pytest.raises(KBError, match="2 column"):
+        await instance.update_content("24", NEW + "\n" + TABLE, table_widths=[[104, 572, 90]])
