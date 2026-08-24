@@ -164,12 +164,12 @@ def _with_widths(markdown, widths):
     return doc
 
 
-async def test_widths_are_checked_after_the_page_is_gone(monkeypatch, tmp_path):
-    """The widths path must not hold the page open waiting on the server.
+async def test_widths_wait_for_the_server_like_the_body_does(monkeypatch, tmp_path):
+    """The page is held until Weeek serves the widths back.
 
-    Holding it is what breaks this write: the widths reach the server within
-    seconds and are reverted while the page is still open, so the poll never
-    sees them. The body path waits; this one closes and then verifies.
+    Closing sooner throws the sync away. This waited once before the repeated
+    set existed, watched an attribute the plugin had already put back, and got
+    the blame for a failure it was only reporting.
     """
     state = tmp_path / "storage_state.json"
     state.write_text("{}")
@@ -193,7 +193,8 @@ async def test_widths_are_checked_after_the_page_is_gone(monkeypatch, tmp_path):
     monkeypatch.setattr(kb_client, "set_table_columns", fake_size)
     result = await instance.set_table_widths("24", table_index=0, widths=[104, 572])
 
-    assert seen["settled"] is None, "the widths path must not wait with the page open"
+    assert seen["settled"] is not None, "the widths path has to wait for the server"
+    assert await seen["settled"]([[104, 572]]) is True
     assert result["widths"] == [[104, 572]]
 
 
