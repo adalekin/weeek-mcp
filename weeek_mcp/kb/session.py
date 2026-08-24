@@ -30,6 +30,9 @@ Settled = Callable[[list[list[int] | None] | None], Awaitable[bool]]
 _LOGIN_TIMEOUT = 45.0  # hard ceiling so a stuck browser fails loudly instead of hanging
 _EDIT_TIMEOUT = 60.0  # a paste that also restores table widths waits on two syncs
 _SETTLE_POLL_MS = 500  # how often the server is asked whether the sync arrived
+_APPLY_ATTEMPTS = 4  # a late reconciliation pass can undo the attribute; set it again
+_APPLY_RECHECK_MS = 2500  # long enough for that pass to have happened
+_APPLY_RETRY_MS = 1500  # breathing room before setting it once more
 _SETTLE_TIMEOUT = 30.0  # the wait has to end inside the CALLER's timeout, not just ours: a
 # browser start costs ~15s and the transaction ~4s, so anything longer than this gets the whole
 # call killed from outside and the diagnosis never reaches whoever asked for the write
@@ -547,15 +550,33 @@ async def _apply_columns(page, selector: str, plan: list[dict | None]) -> dict:
     available = int(measured["available"])
     columns = resolve_columns(tables, plan, available)
 
-    applied: dict = await page.evaluate(_APPLY_COLUMNS_JS, {"selector": selector, "columns": columns})
-    if not applied.get("ok"):
-        raise KBAuthError(f"Could not set table widths: {applied.get('error', 'unknown reason')}.")
-    await page.wait_for_timeout(4000)
-    # Ask again after the editor has had time to react: an extension that undoes
-    # the attribute does it on its own schedule, not inside our dispatch.
-    settled_in_editor: dict = await page.evaluate(
-        _APPLY_COLUMNS_JS, {"selector": selector, "columns": [None] * len(columns)}
-    )
+    # The editor keeps working on the document after it first renders, and a late
+    # pass puts back the attributes of tables it re-reconciles — which is why the
+    # tables near the top of a long document were the ones that never kept their
+    # widths. Dispatching once and hoping is not enough: set, look, set again.
+    applied: dict = {}
+    settled_in_editor: dict = {}
+    for attempt in range(_APPLY_ATTEMPTS):
+        applied = await page.evaluate(_APPLY_COLUMNS_JS, {"selector": selector, "columns": columns})
+        if not applied.get("ok"):
+            raise KBAuthError(f"Could not set table widths: {applied.get('error', 'unknown reason')}.")
+        await page.wait_for_timeout(_APPLY_RECHECK_MS)
+        settled_in_editor = await page.evaluate(
+            _APPLY_COLUMNS_JS, {"selector": selector, "columns": [None] * len(columns)}
+        )
+        held = [
+            after == json.dumps(columns[i])
+            for i, after in enumerate(settled_in_editor.get("after") or [])
+            if columns[i]
+        ]
+        if all(held):
+            break
+        if attempt + 1 < _APPLY_ATTEMPTS:
+            await page.wait_for_timeout(_APPLY_RETRY_MS)
+    applied["stuck"] = [
+        None if not columns[i] else (after == json.dumps(columns[i]))
+        for i, after in enumerate(settled_in_editor.get("after") or [None] * len(columns))
+    ]
     return {
         "tables": applied["tables"],
         "changed": applied["changed"],
