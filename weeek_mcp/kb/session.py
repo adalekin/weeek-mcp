@@ -29,7 +29,7 @@ Settled = Callable[[list[list[int] | None] | None], Awaitable[bool]]
 
 _LOGIN_TIMEOUT = 45.0  # hard ceiling so a stuck browser fails loudly instead of hanging
 _EDIT_TIMEOUT = 60.0  # a paste that also restores table widths waits on two syncs
-_SETTLE_POLL_MS = 2000  # how often the server is asked whether the sync arrived
+_SETTLE_POLL_MS = 500  # how often the server is asked whether the sync arrived
 _SETTLE_TIMEOUT = 40.0  # inside _EDIT_TIMEOUT, so the wait ends with a diagnosis, not a cancel
 
 LOGIN_PATH = "/login"  # redirects to /welcome
@@ -549,10 +549,22 @@ async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None], set
     """
     t0 = time.monotonic()
     async with _editor_page(cfg, page_path, _KB_EDITOR, "size tables") as (page, _editor, log):
+        opened = time.monotonic() - t0
         result = await _apply_columns(page, _KB_EDITOR, plan)
-        log(f"size tables: {result['changed']}/{result['tables']} in {time.monotonic() - t0:.1f}s")
+        applied = time.monotonic() - t0
+        log(f"size tables: {result['changed']}/{result['tables']} in {applied:.1f}s")
+        waited = {}
         if settled is not None:
-            await _wait_until_settled(page, settled, result["expected"], "table widths", log)
+            waited = await _wait_until_settled(page, settled, result["expected"], "table widths", log)
+        # Where the time goes, reported to the caller: the browser start is a
+        # fixed cost, and what is left of the client's timeout is the budget the
+        # sync has to land in. Without these numbers a failure says nothing.
+        result["timings"] = {
+            "open_s": round(opened, 1),
+            "apply_s": round(applied - opened, 1),
+            "total_s": round(time.monotonic() - t0, 1),
+            **waited,
+        }
         return result
 
 
@@ -609,7 +621,7 @@ async def _edit(
         log(f"edit {what}: done in {time.monotonic() - t0:.1f}s")
 
 
-async def _wait_until_settled(page, settled: Settled, widths, what: str, log) -> None:
+async def _wait_until_settled(page, settled: Settled, widths, what: str, log) -> dict:
     """Hold the page open until the server reports the edit, or the caller times out.
 
     The editor confirms nothing: a document that never reached the server reads
@@ -617,7 +629,9 @@ async def _wait_until_settled(page, settled: Settled, widths, what: str, log) ->
     the outer ``_EDIT_TIMEOUT`` bounds the wait.
     """
     t0 = time.monotonic()
+    polls = 0
     while not await settled(widths):
+        polls += 1
         waited = time.monotonic() - t0
         if waited > _SETTLE_TIMEOUT:
             log(f"edit {what}: server never took the edit ({waited:.1f}s)")
@@ -629,4 +643,6 @@ async def _wait_until_settled(page, settled: Settled, widths, what: str, log) ->
                 "can leave it empty."
             )
         await page.wait_for_timeout(_SETTLE_POLL_MS)
-    log(f"edit {what}: server has it after {time.monotonic() - t0:.1f}s")
+    waited = time.monotonic() - t0
+    log(f"edit {what}: server has it after {waited:.1f}s")
+    return {"settle_s": round(waited, 1), "polls": polls}

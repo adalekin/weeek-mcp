@@ -511,6 +511,7 @@ class WeeekKB:
             "content_width": result["available"],
             "page": result.get("page"),
             "sizing": result.get("sizing"),
+            "timings": result.get("timings"),
             "widths": stored,
         }
 
