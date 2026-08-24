@@ -372,11 +372,41 @@ _APPLY_COLUMNS_JS = (
         return {ok: false, error: 'the document changed while it was being resized'};
     }
 
+    // What the cells themselves carry. In stock ProseMirror the width of a column
+    // lives here, as colwidth on every cell, and the resizing plugin rebuilds
+    // anything else from it — which would make the table_body attribute a
+    // derived value and explain why setting it alone gets overwritten.
+    const cellWidths = [];
+    positions.forEach((pos) => {
+        const body = view.state.doc.nodeAt(pos);
+        const row = body && body.firstChild;
+        const found = [];
+        if (row) row.forEach(cell => found.push((cell.attrs && cell.attrs.colwidth) || null));
+        cellWidths.push(found);
+    });
+
     let tr = view.state.tr;
     let changed = 0;
     positions.forEach((pos, i) => {
         if (!columns[i]) return;
         tr = tr.setNodeAttribute(pos, 'columns', JSON.stringify(columns[i]));
+        // And the cells, which is where the resizer actually writes.
+        const widths = columns[i].map(c => c.width);
+        const body = view.state.doc.nodeAt(pos);
+        if (body) {
+            body.forEach((row, rowOffset) => {
+                let k = 0;
+                row.forEach((cell, cellOffset) => {
+                    const span = (cell.attrs && cell.attrs.colspan) || 1;
+                    const take = widths.slice(k, k + span);
+                    if (take.length) {
+                        const cellPos = pos + 1 + rowOffset + 1 + cellOffset;
+                        tr = tr.setNodeMarkup(cellPos, undefined, {...cell.attrs, colwidth: take});
+                    }
+                    k += span;
+                });
+            });
+        }
         changed++;
     });
     if (changed) view.dispatch(tr);
@@ -411,7 +441,7 @@ _APPLY_COLUMNS_JS = (
         if (node.type.name === 'table_body') after.push(node.attrs.columns || null);
     });
     const stuck = positions.map((_, i) => (!columns[i] ? null : after[i] === JSON.stringify(columns[i])));
-    return {ok: true, tables: positions.length, changed, stuck, after, layout};
+    return {ok: true, tables: positions.length, changed, stuck, after, layout, cellWidths};
 }"""
 )
 
@@ -612,6 +642,7 @@ async def _apply_columns(page, selector: str, plan: list[dict | None]) -> dict:
         "changed": applied["changed"],
         "stuck": applied.get("stuck"),
         "layout": applied.get("layout"),
+        "cell_widths": applied.get("cellWidths"),
         "editor_after": settled_in_editor.get("after"),
         "available": available,
         "page": measured.get("page"),
