@@ -30,10 +30,11 @@ Settled = Callable[[list[list[int] | None] | None], Awaitable[bool]]
 _LOGIN_TIMEOUT = 45.0  # hard ceiling so a stuck browser fails loudly instead of hanging
 _EDIT_TIMEOUT = 60.0  # a paste that also restores table widths waits on two syncs
 _SETTLE_POLL_MS = 500  # how often the server is asked whether the sync arrived
-_APPLY_ATTEMPTS = 4  # a late reconciliation pass can undo the attribute; set it again
-_APPLY_RECHECK_MS = 2500  # long enough for that pass to have happened
-_APPLY_RETRY_MS = 1500  # breathing room before setting it once more
-_SCROLL_SETTLE_MS = 800  # let the editor finish reacting to the viewport move
+_APPLY_ATTEMPTS = 2  # a late pass can undo the attribute; set it again, but the whole call
+# has to stay inside the caller's 60s and a browser start already costs 15 of them
+_APPLY_RECHECK_MS = 1200  # long enough for that pass to have happened
+_APPLY_RETRY_MS = 400  # breathing room before setting it once more
+_SCROLL_SETTLE_MS = 250  # let the editor finish reacting to the viewport move
 _DRAG_SETTLE_MS = 600  # let the plugin write the attribute after a handle is dropped
 _SETTLE_TIMEOUT = 30.0  # the wait has to end inside the CALLER's timeout, not just ours: a
 # browser start costs ~15s and the transaction ~4s, so anything longer than this gets the whole
@@ -700,27 +701,11 @@ async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None], set
         result = await _apply_columns(page, _KB_EDITOR, plan)
         applied = time.monotonic() - t0
         log(f"size tables: {result['changed']}/{result['tables']} in {applied:.1f}s")
-        stuck = result.get("stuck") or []
+        # No dragging: the handles are only in the markup once a pointer has been
+        # over the table, so a headless page never has any. And no raising on the
+        # in-editor check either — it has been wrong in both directions today, and
+        # the server's answer below is the one that decides.
         drags = []
-        if False in stuck:
-            # The plugin put its own widths back. Ask it the way it expects to be
-            # asked: drag the handles it listens on, one boundary at a time.
-            log(f"size tables: attribute did not hold ({stuck}), dragging the handles")
-            expected = result.get("expected") or []
-            for i, held in enumerate(stuck):
-                if held is not False or i >= len(expected) or not expected[i]:
-                    continue
-                drags.append(await _drag_columns(page, _KB_EDITOR, i, list(expected[i]), log))
-            recheck = await page.evaluate(_APPLY_COLUMNS_JS, {"selector": _KB_EDITOR, "columns": [None] * len(stuck)})
-            result["after_drag"] = recheck.get("after")
-            result["drags"] = drags
-        if False in stuck and not drags:
-            raise KBEditDiscardedError(
-                "The editor accepted the width transaction and then discarded it: the attribute is "
-                f"no longer on the table afterwards (stuck={stuck}). Nothing reached the sync, so the "
-                "server serving the old widths is correct and no one is holding the document. "
-                "Retrying will not help — the table extension is overwriting the widths."
-            )
         # Wait for the server, now that the attribute demonstrably holds: the
         # repeated set is what made it hold, and without a wait the page closes
         # before the sync leaves it. An earlier version of this waited without
