@@ -52,10 +52,21 @@ PRIORITY_DESCRIPTION = (
     "Priority as a number or a label: 0 low (Низкий), 1 medium (Средний), 2 high (Высокий), 3 hold (Замороженный)."
 )
 PRIORITY_SCHEMA = {
-    "type": ["integer", "string"],
-    "enum": [0, 1, 2, 3, *PRIORITIES],
+    "anyOf": [
+        {"type": "integer", "enum": [0, 1, 2, 3]},
+        {"type": "string", "enum": [*PRIORITIES]},
+    ],
     "description": PRIORITY_DESCRIPTION,
 }
+
+
+def _nullable(type_: str) -> dict[str, Any]:
+    """A value of ``type_`` or null.
+
+    Written as ``anyOf`` rather than ``{"type": [type_, "null"]}``: a client that carries one type
+    per property drops the list form, and the untyped value then reaches this server as a string.
+    """
+    return {"anyOf": [{"type": type_}, {"type": "null"}]}
 
 
 def _priority(value: Any) -> Any:
@@ -291,7 +302,7 @@ TASK_TOOLS: list[types.Tool] = [
                 "title": {"type": "string"},
                 "project_id": {"type": "integer"},
                 "board_column_id": {
-                    "type": ["integer", "null"],
+                    **_nullable("integer"),
                     "description": "Target column; null puts the task in the board default.",
                 },
                 "description": {
@@ -459,9 +470,9 @@ TASK_TOOLS: list[types.Tool] = [
             "type": "object",
             "properties": {
                 "task_id": {"type": "integer"},
-                "parent_id": {"type": ["integer", "null"], "description": "New parent; null makes it top-level."},
-                "after": {"type": ["integer", "null"], "description": "Sibling task id to sit after."},
-                "before": {"type": ["integer", "null"], "description": "Sibling task id to sit before."},
+                "parent_id": {**_nullable("integer"), "description": "New parent; null makes it top-level."},
+                "after": {**_nullable("integer"), "description": "Sibling task id to sit after."},
+                "before": {**_nullable("integer"), "description": "Sibling task id to sit before."},
             },
             "required": ["task_id", "parent_id"],
         },
@@ -474,7 +485,7 @@ TASK_TOOLS: list[types.Tool] = [
             "properties": {
                 "task_id": {"type": "integer"},
                 "project_id": {"type": "integer"},
-                "board_column_id": {"type": ["integer", "null"]},
+                "board_column_id": _nullable("integer"),
             },
             "required": ["task_id", "project_id"],
         },
@@ -612,7 +623,7 @@ TASK_TOOLS: list[types.Tool] = [
                 "project_id": {"type": "integer", "description": "Required for create."},
                 "name": {"type": "string", "description": "Required for create and update."},
                 "upper_board_id": {
-                    "type": ["integer", "null"],
+                    **_nullable("integer"),
                     "description": "move: the board to sit below; null moves it to the top.",
                 },
             },
@@ -632,7 +643,7 @@ TASK_TOOLS: list[types.Tool] = [
                 "board_id": {"type": "integer", "description": "Required for create."},
                 "name": {"type": "string", "description": "Required for create and update."},
                 "upper_board_column_id": {
-                    "type": ["integer", "null"],
+                    **_nullable("integer"),
                     "description": "move: the column to sit after; null moves it first.",
                 },
             },
@@ -648,7 +659,7 @@ TASK_TOOLS: list[types.Tool] = [
                 "action": {"type": "string", "enum": ["list", "get", "create", "update", "delete"]},
                 "portfolio_id": {"type": "integer", "description": "Required for get, update and delete."},
                 "name": {"type": "string", "description": "Required for create and update."},
-                "parent_id": {"type": ["integer", "null"], "description": "Nest a portfolio under another one."},
+                "parent_id": {**_nullable("integer"), "description": "Nest a portfolio under another one."},
                 "search": {"type": "string", "description": "list only."},
                 "limit": {"type": "integer", "description": "list only."},
                 "offset": {"type": "integer", "description": "list only."},
@@ -890,7 +901,7 @@ KB_TOOLS: list[types.Tool] = [
                     ),
                 },
                 "icon": {
-                    "type": ["string", "null"],
+                    **_nullable("string"),
                     "description": (
                         "New document icon: a single emoji (e.g. 🚀) or one of the built-in "
                         "icon names from weeek_kb_icons. Pass null or an empty string to "
@@ -926,7 +937,7 @@ KB_TOOLS: list[types.Tool] = [
                 },
                 "widths": {
                     "type": "array",
-                    "items": {"type": ["integer", "null"]},
+                    "items": _nullable("integer"),
                     "description": (
                         "One width in pixels per column, in column order; minimum 90. "
                         "null leaves that column as it is. The list length must match "

@@ -53,3 +53,26 @@ async def test_unknown_tool_raises():
 
 def test_kb_uri_roundtrip():
     assert tools.kb_doc_id_from_uri(tools.kb_uri("abc123")) == "abc123"
+
+
+def _type_array_paths(node, path):
+    """Yield schema paths whose ``type`` is a list, e.g. ``{"type": ["integer", "null"]}``."""
+    if isinstance(node, dict):
+        if isinstance(node.get("type"), list):
+            yield path
+        for key, value in node.items():
+            yield from _type_array_paths(value, f"{path}.{key}")
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from _type_array_paths(value, f"{path}[{index}]")
+
+
+def test_no_type_arrays_in_input_schemas():
+    """A client that keeps one ``type`` per property drops a list-valued one, then sends the value
+    as a string, which fails this server's own validation. Nullability goes through ``anyOf``."""
+    offenders = [
+        offender
+        for tool in (*tools.TASK_TOOLS, *tools.KB_TOOLS)
+        for offender in _type_array_paths(tool.inputSchema, tool.name)
+    ]
+    assert offenders == []
