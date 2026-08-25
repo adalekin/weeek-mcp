@@ -725,6 +725,9 @@ async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None], set
     t0 = time.monotonic()
     async with _editor_page(cfg, page_path, _KB_EDITOR, "size tables") as (page, _editor, log):
         opened = time.monotonic() - t0
+        # Read the editor's own surface first: a failure further down must not be
+        # the reason this never gets reported. That has happened twice already.
+        editor_api = await page.evaluate(_EXTENSIONS_JS, {"selector": _KB_EDITOR})
         result = await _apply_columns(page, _KB_EDITOR, plan)
         applied = time.monotonic() - t0
         log(f"size tables: {result['changed']}/{result['tables']} in {applied:.1f}s")
@@ -740,12 +743,15 @@ async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None], set
         # was blamed for the failure it was only reporting.
         waited = {}
         if settled is not None:
-            waited = await _wait_until_settled(page, settled, result["expected"], "table widths", log)
+            try:
+                waited = await _wait_until_settled(page, settled, result["expected"], "table widths", log)
+            except KBNotSettledError as exc:
+                raise KBNotSettledError(f"{exc} Editor API: {editor_api}.") from exc
         # Where the time goes, reported to the caller: the browser start is a
         # fixed cost, and what is left of the client's timeout is the budget the
         # sync has to land in. Without these numbers a failure says nothing.
         result["drags"] = drags or None
-        result["editor_api"] = await page.evaluate(_EXTENSIONS_JS, {"selector": _KB_EDITOR})
+        result["editor_api"] = editor_api
         result["after_drag"] = result.get("after_drag")
         result["timings"] = {
             "open_s": round(opened, 1),
