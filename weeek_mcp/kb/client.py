@@ -72,6 +72,7 @@ class KBDocument:
     title: str
     path: str  # breadcrumb trail, e.g. "Технологии / Провайдеры"
     icon: str | None = None  # emoji character or built-in icon name, when set
+    crumbs: tuple[str, ...] = ()  # breadcrumb names, self last; folders are crumbs[:-1]
 
 
 _VARIATION_SELECTOR = "\ufe0f"
@@ -106,10 +107,51 @@ def _safe_name(name: str) -> str:
     return (cleaned or "untitled")[:120]
 
 
-def _breadcrumb(article: dict) -> str:
+# Our front matter stamp. It sits in the first lines, so a short read is enough
+# to tell our own file from one the user dropped into the folder by hand.
+_EXPORT_STAMP = re.compile(r"^weeek_id: \d+$", re.M)
+_STAMP_PROBE = 400
+
+
+def _prune_export(root: Path, kept: set[Path]) -> list[str]:
+    """Drop exported files the current export no longer accounts for.
+
+    A renamed or moved document writes itself under a new name and leaves the old
+    file behind; a deleted one leaves its file forever. Both make the folder drift
+    away from the knowledge base it is supposed to mirror.
+
+    Only files carrying our own front matter are candidates. Anything else in the
+    folder belongs to the user and is left alone.
+    """
+    removed: list[str] = []
+    for path in sorted(root.rglob("*.md")):
+        if path in kept or not path.is_file():
+            continue
+        try:
+            head = path.read_text(errors="replace")[:_STAMP_PROBE]
+        except OSError:
+            continue
+        if not _EXPORT_STAMP.search(head):
+            continue  # not ours to delete
+        path.unlink()
+        removed.append(str(path))
+
+    # Deepest first, so a folder emptied by the loop above can go too.
+    for folder in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if folder.is_dir() and not any(folder.iterdir()):
+            folder.rmdir()
+
+    return removed
+
+
+def _breadcrumb_parts(article: dict) -> list[str]:
+    """Breadcrumb names in order, self last. Empty crumbs are dropped."""
     crumbs = article.get("breadcrumbs") or []
-    names = [c.get("name", "") for c in crumbs if isinstance(c, dict)]
-    return " / ".join(n for n in names if n)
+    return [c["name"] for c in crumbs if isinstance(c, dict) and c.get("name")]
+
+
+def _breadcrumb(article: dict) -> str:
+    return " / ".join(_breadcrumb_parts(article))
 
 
 class WeeekKB:
@@ -214,6 +256,7 @@ class WeeekKB:
                 title=a.get("name") or str(a["id"]),
                 path=_breadcrumb(a),
                 icon=self._icon_label(a.get("avatar")),
+                crumbs=tuple(_breadcrumb_parts(a)),
             )
             for a in articles
         ]
@@ -409,7 +452,13 @@ class WeeekKB:
             art = fresh.get("article") or art
 
         self._invalidate_cache()
-        return KBDocument(id=doc_id, title=art.get("name") or title, path=_breadcrumb(art), icon=label)
+        return KBDocument(
+            id=doc_id,
+            title=art.get("name") or title,
+            path=_breadcrumb(art),
+            icon=label,
+            crumbs=tuple(_breadcrumb_parts(art)),
+        )
 
     async def rename_document(self, doc_id: str, title: str) -> None:
         ws = await self._workspace()
@@ -560,6 +609,11 @@ class WeeekKB:
         the folder to a Claude Desktop project's Context), which take file content
         rather than links.
 
+        The folder is a mirror, not an overlay: a full export also drops files it
+        no longer accounts for, so a renamed, moved or deleted document does not
+        leave a stale copy behind. Only files carrying our own front matter are
+        touched. A filtered export (``query``) writes a subset and prunes nothing.
+
         ``target_dir`` must be absolute. The server runs with its own checkout as
         the working directory, so a relative path lands inside the repository.
         """
@@ -576,9 +630,10 @@ class WeeekKB:
         root.mkdir(parents=True, exist_ok=True)
 
         written: list[str] = []
+        kept: set[Path] = set()
         for d in docs:
             body = await self.read_document(d.id)
-            parts = [p.strip() for p in d.path.split("/") if p.strip()]
+            parts = list(d.crumbs)
             if parts and parts[-1] == d.title:
                 parts = parts[:-1]  # last crumb is the document itself
             folder = root.joinpath(*[_safe_name(p) for p in parts]) if parts else root
@@ -591,8 +646,19 @@ class WeeekKB:
             front = f"---\ntitle: {d.title}\nweeek_id: {d.id}\nweeek_path: {d.path}\n---\n\n"
             path.write_text(front + body)
             written.append(str(path))
+            kept.add(path)
 
-        return {"exported": len(written), "directory": str(root), "files": written}
+        # A filtered export is a subset by design, so it is not evidence that the
+        # rest is stale.
+        removed = _prune_export(root, kept) if not query.strip() else []
+
+        return {
+            "exported": len(written),
+            "removed": len(removed),
+            "directory": str(root),
+            "files": written,
+            "pruned": removed,
+        }
 
     async def delete_document(self, doc_id: str, *, permanent: bool = False) -> None:
         ws = await self._workspace()

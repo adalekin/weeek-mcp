@@ -1018,7 +1018,10 @@ KB_TOOLS: list[types.Tool] = [
             "Export knowledge base documents to a local folder as Markdown files, "
             "mirroring the KB tree. Use this to feed folder-based integrations such as a "
             "Claude Desktop project's Context, which accepts folders rather than MCP "
-            "resources. Re-run to refresh."
+            "resources. Re-run to refresh: the folder is a mirror, so a full export also "
+            "removes files left over from renamed, moved or deleted documents. Files "
+            "without the export's own front matter are never touched. Passing a query "
+            "exports a subset and removes nothing."
         ),
         inputSchema={
             "type": "object",
@@ -1582,7 +1585,11 @@ async def handle_kb_tool(name: str, args: dict[str, Any], kb: WeeekKB) -> Any:
     if name == "weeek_kb_export":
         result = await kb.export_documents(args["target_dir"], query=args.get("query", ""))
         # Keep the response compact: counts and directory, not every path.
-        return {"exported": result["exported"], "directory": result["directory"]}
+        return {
+            "exported": result["exported"],
+            "removed": result["removed"],
+            "directory": result["directory"],
+        }
     if name == "weeek_kb_delete":
         await kb.delete_document(args["doc_id"], permanent=bool(args.get("permanent")))
         return {"id": args["doc_id"], "deleted": True, "permanent": bool(args.get("permanent"))}
