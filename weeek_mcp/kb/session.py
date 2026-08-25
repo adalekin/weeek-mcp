@@ -777,20 +777,10 @@ async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None], set
         # the reason this never gets reported. That has happened twice already.
         editor_api = await page.evaluate(_EXTENSIONS_JS, {"selector": _KB_EDITOR})
         result = await _apply_columns(page, _KB_EDITOR, plan)
-        # The transaction above is not what makes this stick; the Y document is.
-        columns = [
-            [
-                {"id": c["id"], "width": c["width"], "color": c["color"], "backgroundColor": c["backgroundColor"]}
-                for c in cols
-            ]
-            if cols
-            else None
-            for cols in (result.get("resolved") or [])
-        ]
-        yjs = await page.evaluate(_YJS_COLUMNS_JS, {"selector": _KB_EDITOR, "columns": columns})
-        log(f"size tables: yjs write {yjs}")
-        result["yjs"] = yjs
-        await page.wait_for_timeout(1200)
+        # No direct write into the Y document. Reaching into it behind
+        # y-prosemirror desynchronises the binding, and after that nothing the
+        # editor does reaches the server at all — tables that had been writing
+        # fine all evening stopped the moment it was added.
         applied = time.monotonic() - t0
         log(f"size tables: {result['changed']}/{result['tables']} in {applied:.1f}s")
         # No dragging: the handles are only in the markup once a pointer has been
