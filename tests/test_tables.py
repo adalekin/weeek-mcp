@@ -5,10 +5,12 @@ import json
 import pytest
 
 from weeek_mcp.kb.tables import (
+    PAGE_WIDTH,
     MeasuredTable,
     TableInfo,
     TableShapeError,
     carry_over_plan,
+    ceiling,
     fit_widths,
     read_tables,
     resolve_columns,
@@ -68,6 +70,24 @@ def test_read_tables_tolerates_empty_document():
 def test_fit_widths_fill_the_content_column():
     assert sum(fit_widths(3, 676)) == 676
     assert fit_widths(3, 676) == [225, 225, 226]
+
+
+def test_a_table_can_be_fitted_to_either_ceiling():
+    """Weeek gives a table two widths to sit in, and which one is a decision."""
+    assert ceiling("text") == 676
+    assert ceiling("page") == PAGE_WIDTH == 1040
+    assert sum(fit_widths(4, ceiling("page"))) == 1040
+
+
+def test_an_unknown_ceiling_is_refused_by_name():
+    with pytest.raises(ValueError, match="text, page"):
+        ceiling("full-bleed")
+
+
+def test_the_wide_ceiling_reaches_resolve_columns():
+    """The choice has to survive the planning step, not just the constant."""
+    resolved = resolve_columns([MeasuredTable(columns=4, raw_columns=None)], [{"mode": "fit"}], ceiling("page"))
+    assert sum(entry["width"] for entry in resolved[0]) == 1040
 
 
 def test_fit_widths_respect_the_minimum_when_columns_do_not_fit():

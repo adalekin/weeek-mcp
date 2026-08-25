@@ -897,8 +897,9 @@ KB_TOOLS: list[types.Tool] = [
             "bold/italic/strike/code/links). Note: the body is written over Weeek's "
             "collaborative channel, not REST, which does not accept bodies at all. "
             "Table column widths are carried across the "
-            "replacement; a table that gained or lost a column is re-spread across the "
-            "content column instead."
+            "replacement; a table that gained or lost a column, and any new table, is "
+            "spread across the width argument instead — the column of text by default, "
+            'or the whole document area with width="page".'
         ),
         inputSchema={
             "type": "object",
@@ -946,6 +947,16 @@ KB_TOOLS: list[types.Tool] = [
                         "tables are rebuilt by the replacement, so the widths land with them."
                     ),
                 },
+                "width": {
+                    "type": "string",
+                    "enum": ["text", "page"],
+                    "description": (
+                        'Which width new and reshaped tables are spread across: "text" '
+                        '(676px, inside the column of text, the default) or "page" (1040px, '
+                        "overhanging it across the document area). Tables that kept their "
+                        "shape keep their own widths either way."
+                    ),
+                },
             },
             "required": ["doc_id"],
         },
@@ -956,11 +967,11 @@ KB_TOOLS: list[types.Tool] = [
             "Resize the columns of a table in a knowledge base document. Weeek stores "
             "column widths in pixels (minimum 90) and nothing else — there is no row "
             "height or table width to set. Pass widths for exact sizes, or fit=true to "
-            "spread the table across the document's content column (~676px), which is "
-            "the usual intent for a table that looks too narrow. Tables are addressed "
-            "by their order in the document, starting at 0; omitting table_index with "
-            "fit=true resizes every table. Written over Weeek's collaborative channel, "
-            "leaving the document's content untouched."
+            "spread the table across the width chosen by the width argument: the column "
+            "of text (676px, default) or the whole document area (1040px), which a table "
+            "may overhang. Tables are addressed by their order in the document, starting "
+            "at 0; omitting table_index with fit=true resizes every table. Written over "
+            "Weeek's collaborative channel, leaving the document's content untouched."
         ),
         inputSchema={
             "type": "object",
@@ -984,7 +995,17 @@ KB_TOOLS: list[types.Tool] = [
                 },
                 "fit": {
                     "type": "boolean",
-                    "description": "Spread the columns evenly across the content column instead of giving widths.",
+                    "description": "Spread the columns evenly across the chosen width instead of giving widths.",
+                },
+                "width": {
+                    "type": "string",
+                    "enum": ["text", "page"],
+                    "description": (
+                        'Which ceiling a fitted table is spread across: "text" (676px, inside '
+                        'the column of text, the default) or "page" (1040px, overhanging it '
+                        'across the document area). Pick "page" for a table whose cells hold '
+                        "sentences rather than words — it is what wide roadmap-style tables use."
+                    ),
                 },
             },
             "required": ["doc_id"],
@@ -1558,7 +1579,10 @@ async def handle_kb_tool(name: str, args: dict[str, Any], kb: WeeekKB) -> Any:
             actions.append("renamed")
         if args.get("content_markdown") is not None:
             await kb.update_content(
-                args["doc_id"], args["content_markdown"], table_widths=_table_widths(args.get("table_widths"))
+                args["doc_id"],
+                args["content_markdown"],
+                table_widths=_table_widths(args.get("table_widths")),
+                width=args.get("width", "text"),
             )
             actions.append("content replaced")
         elif args.get("table_widths") is not None:
@@ -1575,6 +1599,7 @@ async def handle_kb_tool(name: str, args: dict[str, Any], kb: WeeekKB) -> Any:
             table_index=args.get("table_index"),
             widths=args.get("widths"),
             fit=bool(args.get("fit")),
+            width=args.get("width", "text"),
         )
         return {"id": args["doc_id"], **result}
     if name == "weeek_kb_move":

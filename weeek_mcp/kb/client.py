@@ -53,9 +53,9 @@ from . import collab
 from .prosemirror import markdown_to_doc, to_markdown
 from .session import KBAuthError, automated_login, load_cookies_into
 from .tables import (
-    FALLBACK_CONTENT_WIDTH,
     MeasuredTable,
     carry_over_plan,
+    ceiling,
     read_tables,
     resolve_columns,
     size_new_tables,
@@ -529,7 +529,11 @@ class WeeekKB:
             raise KBError(str(exc)) from exc
 
     async def update_content(
-        self, doc_id: str, markdown: str, table_widths: list[list[int] | None] | None = None
+        self,
+        doc_id: str,
+        markdown: str,
+        table_widths: list[list[int] | None] | None = None,
+        width: str = "text",
     ) -> None:
         """Replace a document's body in place, over the collaborative channel.
 
@@ -539,7 +543,8 @@ class WeeekKB:
 
         Column widths are not part of the Markdown, so they are read from the old
         body and carried onto the new one; tables whose shape changed, and new
-        ones, are fitted to the content column instead.
+        ones, are fitted to ``width`` instead — "text" for the column of text,
+        "page" to overhang it and span the document area.
         """
         before = read_tables(await self._document_content(doc_id))
         doc = markdown_to_doc(markdown)
@@ -562,7 +567,7 @@ class WeeekKB:
                 plan[i] = {"mode": "widths", "widths": list(want)}
         if plan is not None:
             measured = [MeasuredTable(columns=t.columns, raw_columns=None) for t in after]
-            write_columns(doc, resolve_columns(measured, plan, FALLBACK_CONTENT_WIDTH))
+            write_columns(doc, resolve_columns(measured, plan, ceiling(width)))
         wanted = to_markdown(doc)
 
         async def settled() -> bool:
@@ -598,6 +603,7 @@ class WeeekKB:
         table_index: int | None = None,
         widths: list[int | None] | None = None,
         fit: bool = False,
+        width: str = "text",
     ) -> dict:
         """Set column widths on a document's tables, leaving their content alone.
 
@@ -612,7 +618,7 @@ class WeeekKB:
         def size(fragment) -> None:
             bodies = [collab.measure_body(body) for body in collab.table_bodies(fragment)]
             measured = [MeasuredTable(columns=columns, raw_columns=raw) for columns, raw in bodies]
-            resolved = resolve_columns(measured, plan, FALLBACK_CONTENT_WIDTH)
+            resolved = resolve_columns(measured, plan, ceiling(width))
             expected.extend([[e["width"] for e in entries] if entries else None for entries in resolved])
             for body, entries in zip(collab.table_bodies(fragment), resolved, strict=True):
                 if entries is not None:
@@ -638,7 +644,7 @@ class WeeekKB:
         return {
             "tables": len(expected),
             "changed": sum(1 for want in expected if want is not None),
-            "content_width": FALLBACK_CONTENT_WIDTH,
+            "fitted_to": {"width": width, "pixels": ceiling(width)},
             "widths": stored,
         }
 

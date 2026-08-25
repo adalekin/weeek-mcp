@@ -194,6 +194,28 @@ async def test_explicit_widths_ride_with_the_body(kb, monkeypatch):
     assert captured["widths"] == [104, 572]
 
 
+async def test_a_new_table_can_be_spread_across_the_page(kb, monkeypatch):
+    """width="page" is the wide ceiling: the table overhangs the column of text."""
+    instance, server = kb
+    captured = {}
+
+    async def fake_apply(url, name, token, change, settled=None):
+        from pycrdt import Doc, XmlFragment
+
+        fragment = Doc().get(collab.FRAGMENT, type=XmlFragment)
+        change(fragment)
+        body = collab.table_bodies(fragment)[0]
+        captured["sum"] = sum(entry["width"] for entry in json.loads(body.attributes.get("columns")))
+        server.receives(NEW + "\n" + TABLE)
+
+    monkeypatch.setattr(collab, "apply", fake_apply)
+    await instance.update_content("24", NEW + "\n" + TABLE, width="page")
+    assert captured["sum"] == 1040
+
+    await instance.update_content("24", NEW + "\n" + TABLE)
+    assert captured["sum"] == 676, "the column of text stays the default"
+
+
 async def test_a_width_list_per_table_is_required(kb, monkeypatch):
     """A miscounted list would silently size the wrong table, so it is refused."""
     instance, _server = kb

@@ -22,7 +22,26 @@ from dataclasses import dataclass
 
 MIN_WIDTH = 90  # the editor's own floor, enforced in its mousemove handler
 DEFAULT_COLUMN_WIDTH = 180  # what the editor gives a column it was never told about
-FALLBACK_CONTENT_WIDTH = 676  # the KB content column is a fixed 680px, less 2px padding either side
+
+# A table has two ceilings, and which one it is fitted to is a decision, not a
+# detail: it can sit inside the column of text, or overhang it and span the whole
+# document area. Measured on a live document — the text column is a fixed 680px
+# (676 inside its padding) whatever the window does, while the page area is the
+# window less the sidebar, 1040px at the 1280px window the roadmap's tables were
+# sized against. A table wider than the reader's window keeps its own horizontal
+# scrollbar, so the wide ceiling degrades rather than breaks.
+FALLBACK_CONTENT_WIDTH = 676
+PAGE_WIDTH = 1040
+
+CEILINGS = {"text": FALLBACK_CONTENT_WIDTH, "page": PAGE_WIDTH}
+
+
+def ceiling(name: str) -> int:
+    """Pixels available under the named ceiling: "text" or "page"."""
+    try:
+        return CEILINGS[name]
+    except KeyError:
+        raise ValueError(f"Unknown width {name!r}. Use one of: {', '.join(CEILINGS)}.") from None
 
 
 class TableShapeError(RuntimeError):
