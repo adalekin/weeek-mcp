@@ -1023,7 +1023,14 @@ KB_TOOLS: list[types.Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "target_dir": {"type": "string", "description": "Destination folder path."},
+                "target_dir": {
+                    "type": "string",
+                    "description": (
+                        "Destination folder, as an absolute path. A relative path is "
+                        "rejected: it would resolve against the server's working "
+                        "directory, not the caller's."
+                    ),
+                },
                 "query": {
                     "type": "string",
                     "description": "Optional search filter; omit to export everything.",

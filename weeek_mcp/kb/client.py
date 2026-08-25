@@ -559,9 +559,20 @@ class WeeekKB:
         document id and path. Intended for folder-based integrations (e.g. adding
         the folder to a Claude Desktop project's Context), which take file content
         rather than links.
+
+        ``target_dir`` must be absolute. The server runs with its own checkout as
+        the working directory, so a relative path lands inside the repository.
         """
-        docs = await self.search(query) if query.strip() else await self.list_documents(force=True)
         root = Path(target_dir).expanduser()
+        if not root.is_absolute():
+            raise KBError(
+                f"target_dir must be an absolute path, got {target_dir!r}. "
+                "A relative path resolves against the server's working directory, "
+                "which is the repository checkout, and mkdir(parents=True) would "
+                "silently create the tree there."
+            )
+
+        docs = await self.search(query) if query.strip() else await self.list_documents(force=True)
         root.mkdir(parents=True, exist_ok=True)
 
         written: list[str] = []
