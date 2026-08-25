@@ -1,8 +1,9 @@
-"""Task description updates, which go through the editor rather than REST."""
+"""Task description updates, which go through the collaborative channel rather than REST."""
 
 import pytest
 
 from weeek_mcp import tools
+from weeek_mcp.kb.prosemirror import markdown_to_html
 
 
 class FakeAPI:
@@ -21,15 +22,8 @@ class FakeAPI:
         return {"success": True, "task": {"id": task_id, "description": self.description}}
 
 
-class FakeKB:
-    config = "cfg"
-
-    async def workspace(self):
-        return "923663"
-
-
 class FakeEditor:
-    """Stands in for the headless editor; syncs its writes into the APIs watching it."""
+    """Stands in for the collaborative channel; syncs its writes into the APIs watching it."""
 
     def __init__(self):
         self.writes = []
@@ -39,17 +33,24 @@ class FakeEditor:
         self.watchers.append(api)
         return api
 
-    async def __call__(self, cfg, workspace_id, task_id, html):
-        self.writes.append((cfg, workspace_id, task_id, html))
+    async def __call__(self, task_id, markdown):
+        html = markdown_to_html(markdown) if markdown.strip() else ""
+        self.writes.append((task_id, markdown, html))
         for api in self.watchers:
             api.description = html or "<p></p>"
 
 
+class FakeKB:
+    def __init__(self, editor):
+        self.update_task_description = editor
+
+    async def workspace(self):
+        return "923663"
+
+
 @pytest.fixture
-def editor(monkeypatch):
-    fake = FakeEditor()
-    monkeypatch.setattr(tools, "replace_task_description", fake)
-    return fake
+def editor():
+    return FakeEditor()
 
 
 async def test_description_goes_through_the_editor_not_the_rest_body(editor):
@@ -58,31 +59,31 @@ async def test_description_goes_through_the_editor_not_the_rest_body(editor):
         "weeek_update_task",
         {"task_id": 42, "description": "новый **текст**"},
         api,
-        FakeKB(),
+        FakeKB(editor),
     )
     _, _, body = api.calls[0]
     assert "description" not in body  # REST ignores it, so it must not look like it worked
-    assert editor.writes == [("cfg", "923663", "42", "<p>новый <strong>текст</strong></p>")]
+    assert editor.writes == [(42, "новый **текст**", "<p>новый <strong>текст</strong></p>")]
 
 
 async def test_markdown_special_characters_are_escaped_before_pasting(editor):
     # Pasted raw, "a < b & c" would be parsed as markup by the browser and lost.
     api = editor.watching(FakeAPI())
     await tools.handle_task_tool(
-        "weeek_update_task", {"task_id": 42, "description": "Цена < 100 & больше"}, api, FakeKB()
+        "weeek_update_task", {"task_id": 42, "description": "Цена < 100 & больше"}, api, FakeKB(editor)
     )
-    assert editor.writes[-1][3] == "<p>Цена &lt; 100 &amp; больше</p>"
+    assert editor.writes[-1][2] == "<p>Цена &lt; 100 &amp; больше</p>"
 
 
 async def test_an_empty_description_clears_it(editor):
     api = editor.watching(FakeAPI())
-    await tools.handle_task_tool("weeek_update_task", {"task_id": 42, "description": ""}, api, FakeKB())
-    assert editor.writes[-1][3] == ""
+    await tools.handle_task_tool("weeek_update_task", {"task_id": 42, "description": ""}, api, FakeKB(editor))
+    assert editor.writes[-1][2] == ""
 
 
 async def test_the_returned_task_is_re_read_after_the_edit(editor):
     api = editor.watching(FakeAPI())
-    result = await tools.handle_task_tool("weeek_update_task", {"task_id": 42, "description": ""}, api, FakeKB())
+    result = await tools.handle_task_tool("weeek_update_task", {"task_id": 42, "description": ""}, api, FakeKB(editor))
     assert ("get_task", 42) in api.calls
     assert result["task"]["description"] == "<p></p>"
 
@@ -90,7 +91,9 @@ async def test_the_returned_task_is_re_read_after_the_edit(editor):
 async def test_an_edit_that_did_not_land_is_reported(editor):
     api = FakeAPI()  # not watching: the editor write never reaches the server
     with pytest.raises(ValueError, match="not stored"):
-        await tools.handle_task_tool("weeek_update_task", {"task_id": 42, "description": "<p>новый</p>"}, api, FakeKB())
+        await tools.handle_task_tool(
+            "weeek_update_task", {"task_id": 42, "description": "<p>новый</p>"}, api, FakeKB(editor)
+        )
 
 
 def test_markup_differences_alone_do_not_count_as_failure():

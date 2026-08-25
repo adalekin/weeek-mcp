@@ -2,7 +2,7 @@
 
 Split into two groups:
   * task tools  -> Weeek public REST API (weeek_api.WeeekAPI)
-  * kb tools    -> knowledge base search over Playwright (kb.client.WeeekKB)
+  * kb tools    -> knowledge base over Weeek's internal API and collaborative channel (kb.client.WeeekKB)
 
 Tool input schemas mirror the Weeek OpenAPI spec, with two deliberate departures
 for callers that work from labels rather than ids: priority also accepts its UI
@@ -32,7 +32,6 @@ import mcp.types as types
 
 from .kb.client import KBDocument, WeeekKB
 from .kb.prosemirror import markdown_to_html, to_markdown
-from .kb.session import replace_task_description
 from .weeek_api import WeeekAPI
 
 KB_URI_SCHEME = "weeek-kb"
@@ -361,8 +360,8 @@ TASK_TOOLS: list[types.Tool] = [
                     "description": (
                         "Replaces the description, as Markdown (same feature set as "
                         "weeek_kb_update); an empty string clears it. Weeek's REST API "
-                        "ignores the description on update, so this drives its editor in a "
-                        "headless browser (a few seconds) and needs the knowledge base session."
+                        "ignores the description on update, so it is written over the same "
+                        "collaborative channel its editor uses, and needs the knowledge base session."
                     ),
                 },
                 "priority": PRIORITY_SCHEMA,
@@ -895,9 +894,9 @@ KB_TOOLS: list[types.Tool] = [
             "Update a knowledge base document. Rename via title, change its icon, and/or "
             "replace the body via content_markdown — same Markdown feature set as "
             "weeek_kb_create (headings, nested lists, tables, images, "
-            "bold/italic/strike/code/links). Note: content replacement drives Weeek's "
-            "editor in a headless browser (a few seconds) because bodies sync over a "
-            "collaborative channel, not REST. Table column widths are carried across the "
+            "bold/italic/strike/code/links). Note: the body is written over Weeek's "
+            "collaborative channel, not REST, which does not accept bodies at all. "
+            "Table column widths are carried across the "
             "replacement; a table that gained or lost a column is re-spread across the "
             "content column instead."
         ),
@@ -960,8 +959,8 @@ KB_TOOLS: list[types.Tool] = [
             "spread the table across the document's content column (~676px), which is "
             "the usual intent for a table that looks too narrow. Tables are addressed "
             "by their order in the document, starting at 0; omitting table_index with "
-            "fit=true resizes every table. Drives Weeek's editor in a headless browser "
-            "(a few seconds), leaving the document's content untouched."
+            "fit=true resizes every table. Written over Weeek's collaborative channel, "
+            "leaving the document's content untouched."
         ),
         inputSchema={
             "type": "object",
@@ -1091,19 +1090,18 @@ async def _write_description(kb: WeeekKB | None, task_id: int, markdown: str) ->
     """Set a task's description through Weeek's editor — REST cannot write it.
 
     Returns the HTML handed to the editor, which is what the result has to match.
-    Markdown goes through the KB converter so that text like ``a < b & c`` is
-    escaped: pasted raw, the browser would parse it as markup and drop it.
+    Markdown goes through the KB converter, which is also what the comparison
+    against Weeek's stored HTML is made against.
     """
     if kb is None:
         raise ValueError(
-            "Updating a description needs the knowledge base session (Playwright): Weeek's "
-            "REST API ignores the description on update. Set WEEEK_EMAIL/WEEEK_PASSWORD or "
-            "run `weeek-mcp-login`, or recreate the task with weeek_create_task, which can "
+            "Updating a description needs the knowledge base session: Weeek's REST API "
+            "ignores the description on update. Set WEEEK_EMAIL/WEEEK_PASSWORD or run "
+            "`weeek-mcp-login`, or recreate the task with weeek_create_task, which can "
             "set a description."
         )
-    body = markdown_to_html(markdown) if markdown.strip() else ""
-    await replace_task_description(kb.config, await kb.workspace(), str(task_id), body)
-    return body
+    await kb.update_task_description(task_id, markdown)
+    return markdown_to_html(markdown) if markdown.strip() else ""
 
 
 def _require_kb(kb: WeeekKB | None, what: str) -> WeeekKB:

@@ -4,25 +4,25 @@
 [![PyPI version](https://img.shields.io/pypi/v/weeek-mcp.svg)](https://pypi.org/project/weeek-mcp/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-An [MCP](https://modelcontextprotocol.io) server for [Weeek](https://weeek.net): manage **tasks** through the public REST API and browse the **knowledge base** through Playwright, exposed as MCP **Resources** so you can search and select KB documents as content (not links) from your MCP client.
+An [MCP](https://modelcontextprotocol.io) server for [Weeek](https://weeek.net): manage **tasks** through the public REST API and browse the **knowledge base** through Weeek's internal API, exposed as MCP **Resources** so you can search and select KB documents as content (not links) from your MCP client.
 
 ## Features
 
 - **Task management** (public REST API): projects, boards, board columns, and full task lifecycle — create, update, complete, move between columns, assign/unassign members.
-- **Knowledge base** (full CRUD): Weeek has no public KB API, so the server calls Weeek's **internal JSON API** (`api.weeek.net/ws/{id}/kb/...`) using cookies from a saved browser login. Documents are rendered to Markdown and published as MCP **Resources** (`weeek-kb://<id>`). Read/list/search/create/rename/delete go over the JSON API; **in-place body editing** drives Weeek's own editor headlessly (bodies sync over a collaborative websocket, not REST). Content is converted between Markdown and Weeek's ProseMirror format automatically.
+- **Knowledge base** (full CRUD): Weeek has no public KB API, so the server calls Weeek's **internal JSON API** (`api.weeek.net/ws/{id}/kb/...`) using cookies from a saved browser login. Documents are rendered to Markdown and published as MCP **Resources** (`weeek-kb://<id>`). Read/list/search/create/rename/delete go over the JSON API; **in-place body editing** speaks Weeek's collaborative protocol directly (Hocuspocus/Yjs), because bodies live in a shared document the REST API only serves a snapshot of. Content is converted between Markdown and Weeek's ProseMirror format automatically.
 - **Capability-aware**: task tools appear when an API token is set; KB tools/resources appear when login credentials or a cached session are present.
 
 ## Requirements
 
 - Python 3.10+
 - A Weeek **API token** for task tools (Weeek → Settings → API).
-- For the knowledge base: `weeek-mcp[kb]` (Playwright) plus the Chromium runtime, and either login credentials or a session seeded once with `weeek-mcp-login`.
+- For the knowledge base: `weeek-mcp[kb]` plus the Chromium runtime (used for login only), and either login credentials or a session seeded once with `weeek-mcp-login`.
 
 ## Installation
 
 ```bash
 pip install weeek-mcp              # task tools only
-pip install "weeek-mcp[kb]"        # + knowledge base (Playwright)
+pip install "weeek-mcp[kb]"        # + knowledge base
 playwright install chromium         # KB runtime
 ```
 
@@ -115,9 +115,8 @@ when you write to one it doesn't cover, so the write is verified and reported.
 Descriptions are editable on an existing task: `weeek_update_task` takes
 `description` as Markdown (empty string clears it). Weeek's REST API only accepts a
 description on create — `PUT /tm/tasks/{id}` has no such field — because
-descriptions sync through the same collaborative editor as KB document bodies, so
-this drives that editor headlessly and needs the knowledge base session (a few
-seconds per task). `weeek_create_task` still takes its `description` as HTML, which
+descriptions sync through the same collaborative channel as KB document bodies, so
+this writes into that channel and needs the knowledge base session. `weeek_create_task` still takes its `description` as HTML, which
 is what that endpoint stores.
 
 Comments are read with `weeek_list_task_comments`, written with `weeek_add_task_comment`
@@ -131,9 +130,9 @@ the saved cookies.
 `weeek_kb_create`, `weeek_kb_update`, `weeek_kb_table_widths`, `weeek_kb_icons`,
 `weeek_kb_delete`.
 
-> `weeek_kb_update` with new content launches a short headless browser session (a few
-> seconds) to drive Weeek's editor, because document bodies are saved over a
-> collaborative websocket rather than REST. The document id is preserved.
+> `weeek_kb_update` with new content writes into the document's shared Yjs document over
+> Weeek's collaborative websocket, because that — not REST — is where bodies are saved.
+> No browser is involved and the document id is preserved.
 
 Tables have one size to set: the pixel width of each column (minimum 90). New tables
 are fitted to the document's content column (~676px) instead of Weeek's 180px-per-column
@@ -169,14 +168,14 @@ content**, not a link.
   should seed the session with `weeek-mcp-login` instead.
 - Document content is ProseMirror/TipTap JSON, converted to/from Markdown by
   [`weeek_mcp/kb/prosemirror.py`](weeek_mcp/kb/prosemirror.py). Editing an existing body
-  goes through Weeek's collaborative editor (there is no REST content-write), so
-  `weeek_kb_update` opens the document in a headless browser and replaces the content
-  there. Authoring covers the common Markdown subset (headings, paragraphs, lists,
+  goes through Weeek's collaborative channel (there is no REST content-write):
+  [`weeek_mcp/kb/collab.py`](weeek_mcp/kb/collab.py) speaks the Hocuspocus protocol,
+  authenticates with a per-socket ticket, and replaces the `prosemirror` fragment of the
+  document's Y.Doc. Authoring covers the common Markdown subset (headings, paragraphs, lists,
   bold/inline code, code blocks, quotes, rules); rich cases like nested lists and tables
   are simplified.
-- Table column widths live on the `table_body` node and are ignored by the editor's HTML
-  parser, so they are re-applied as an editor transaction after the content is replaced
-  ([`weeek_mcp/kb/tables.py`](weeek_mcp/kb/tables.py)). Cell colors and per-column colors
+- Table column widths live on the `table_body` node, as a JSON string, and are written
+  with the body rather than after it ([`weeek_mcp/kb/tables.py`](weeek_mcp/kb/tables.py)). Cell colors and per-column colors
   are stored alongside the widths but are not exposed as tools yet.
 
 ## Development

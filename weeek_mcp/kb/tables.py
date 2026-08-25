@@ -153,6 +153,33 @@ def size_new_tables(doc: dict) -> dict:
     return doc
 
 
+def write_columns(doc: dict, resolved: list[list[dict] | None]) -> dict:
+    """Put resolved ``columns`` entries onto a document's tables, in place.
+
+    The entries come from ``resolve_columns``; this only serializes them onto the
+    matching ``table_body``, in document order. A table the plan left alone keeps
+    whatever it already carried.
+    """
+    bodies: list[dict] = []
+
+    def walk(node: dict) -> None:
+        if node.get("type") == "table_body":
+            bodies.append(node)
+        for child in node.get("content") or []:
+            if isinstance(child, dict):
+                walk(child)
+
+    walk(doc)
+    if len(bodies) != len(resolved):
+        raise TableShapeError(
+            f"The body being written has {len(bodies)} table(s) but {len(resolved)} were sized. Nothing was written."
+        )
+    for body, entries in zip(bodies, resolved, strict=True):
+        if entries is not None:
+            body.setdefault("attrs", {})["columns"] = json.dumps(entries)
+    return doc
+
+
 def read_tables(doc: dict | None) -> list[TableInfo]:
     """Describe every table in a ProseMirror document, in document order."""
     found: list[TableInfo] = []

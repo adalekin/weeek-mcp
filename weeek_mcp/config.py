@@ -15,6 +15,8 @@ DEFAULT_API_BASE = "https://api.weeek.net/public/v1"
 DEFAULT_APP_BASE = "https://app.weeek.net"
 # Internal (non-public) API the web app uses for the knowledge base.
 DEFAULT_INTERNAL_API_BASE = "https://api.weeek.net"
+# Hocuspocus server the editors sync document bodies through.
+DEFAULT_COLLAB_BASE = "wss://collabws.weeek.net"
 
 
 def _state_dir() -> Path:
@@ -49,6 +51,7 @@ class Config:
     # --- Knowledge base (internal API + Playwright for login) ---
     app_base: str
     internal_api_base: str
+    collab_base: str
     workspace_id: str | None  # auto-detected via /ws when not set
     email: str | None
     password: str | None
@@ -73,6 +76,7 @@ class Config:
             api_base=os.environ.get("WEEEK_API_BASE", DEFAULT_API_BASE).rstrip("/"),
             app_base=os.environ.get("WEEEK_APP_BASE", DEFAULT_APP_BASE).rstrip("/"),
             internal_api_base=os.environ.get("WEEEK_INTERNAL_API_BASE", DEFAULT_INTERNAL_API_BASE).rstrip("/"),
+            collab_base=os.environ.get("WEEEK_COLLAB_BASE", DEFAULT_COLLAB_BASE).rstrip("/"),
             workspace_id=os.environ.get("WEEEK_WORKSPACE_ID"),
             email=os.environ.get("WEEEK_EMAIL"),
             password=os.environ.get("WEEEK_PASSWORD"),

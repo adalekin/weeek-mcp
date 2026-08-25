@@ -38,8 +38,10 @@ Public surface (stable for callers):
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,17 +49,19 @@ import httpx
 
 from ..config import Config
 from ..logging_util import make_logger
-from .prosemirror import markdown_to_doc, markdown_to_html, to_markdown
-from .session import (
-    KBAuthError,
-    KBEditDiscardedError,
-    KBNotSettledError,
-    automated_login,
-    load_cookies_into,
-    replace_article_content,
-    set_table_columns,
+from . import collab
+from .prosemirror import markdown_to_doc, to_markdown
+from .session import KBAuthError, automated_login, load_cookies_into
+from .tables import (
+    FALLBACK_CONTENT_WIDTH,
+    MeasuredTable,
+    carry_over_plan,
+    read_tables,
+    resolve_columns,
+    size_new_tables,
+    widths_plan,
+    write_columns,
 )
-from .tables import carry_over_plan, read_tables, size_new_tables, widths_plan
 
 _PAGE_LIMIT = 200
 
@@ -486,22 +490,60 @@ class WeeekKB:
             raise KBError(f"Document {doc_id!r} not found.")
         return (article.get("content") or {}).get("data") or {}
 
+    async def _collab(self, kind: str, item_id: str) -> tuple[str, str, str]:
+        """Where an editor's collaborative channel is, and the ticket to enter it.
+
+        ``kind`` is "article" (a KB document) or "task" (a task description) —
+        the same protocol, two collections. The token is minted per socket;
+        Weeek takes whatever socket id it is given, so ours identifies this
+        client rather than a Pusher connection.
+        """
+        ws = await self._workspace()
+        collection = "kb/articles" if kind == "article" else "tm/tasks"
+        data = await self._post(
+            f"/ws/{ws}/{collection}/{item_id}/content/token", {"socketId": f"weeek-mcp.{uuid.uuid4().hex[:12]}"}
+        )
+        token = data.get("token")
+        if not token:
+            raise KBError(f"Weeek did not issue an editing ticket for {kind} {item_id!r}.")
+        return (
+            collab.endpoint(self._cfg.collab_base, ws, kind, str(item_id)),
+            collab.document_name(ws, kind, str(item_id)),
+            str(token),
+        )
+
+    async def update_task_description(self, task_id: int | str, markdown: str) -> None:
+        """Replace a task's description — the same collaborative channel a body uses.
+
+        ``PUT /tm/tasks/{id}`` has no description field (only create does): like
+        KB bodies, descriptions sync through the editor's Y.Doc.
+        """
+        url, name, token = await self._collab("task", str(task_id))
+        # An empty description is a real request — clear the field — so it is
+        # written as the empty paragraph the editor holds, not refused as a
+        # body that would blank a document by accident.
+        doc = markdown_to_doc(markdown) if markdown.strip() else {"type": "doc", "content": [{"type": "paragraph"}]}
+        try:
+            await collab.apply(url, name, token, lambda fragment: collab.write_body(fragment, doc))
+        except collab.CollabError as exc:
+            raise KBError(str(exc)) from exc
+
     async def update_content(
         self, doc_id: str, markdown: str, table_widths: list[list[int] | None] | None = None
     ) -> None:
-        """Replace a document's body in place via Weeek's editor (collaborative sync).
+        """Replace a document's body in place, over the collaborative channel.
 
-        Column widths do not survive the paste — the editor's table_body spec
-        parses a plain ``tbody`` and drops them — so they are read first and put
-        back in the same browser session. Tables whose shape changed, and new
+        The body is written straight into the document's Y.Doc — the same place
+        the editor writes — because REST only serves a snapshot of it and drops
+        any content handed to it.
+
+        Column widths are not part of the Markdown, so they are read from the old
+        body and carried onto the new one; tables whose shape changed, and new
         ones, are fitted to the content column instead.
         """
-        ws = await self._workspace()
-        # Ensure we have a live session before launching the browser editor.
-        if not self._cfg.storage_state_path.exists():
-            await self._refresh_session()
         before = read_tables(await self._document_content(doc_id))
-        after = read_tables(markdown_to_doc(markdown))
+        doc = markdown_to_doc(markdown)
+        after = read_tables(doc)
         plan = carry_over_plan(before, after) if after else None
         if table_widths is not None and plan is not None:
             # Explicit widths beat carrying the old ones over. They ride with the
@@ -518,26 +560,23 @@ class WeeekKB:
                 if len(want) != after[i].columns:
                     raise KBError(f"Table {i} has {after[i].columns} column(s), got {len(want)} width(s).")
                 plan[i] = {"mode": "widths", "widths": list(want)}
-        wanted = to_markdown(markdown_to_doc(markdown))
+        if plan is not None:
+            measured = [MeasuredTable(columns=t.columns, raw_columns=None) for t in after]
+            write_columns(doc, resolve_columns(measured, plan, FALLBACK_CONTENT_WIDTH))
+        wanted = to_markdown(doc)
 
-        async def settled(widths: list[list[int] | None] | None) -> bool:
+        async def settled() -> bool:
             """Whether Weeek itself now serves the body that was written.
 
-            Only the body. Widths used to be part of this condition, and that was
-            wrong twice over: a body that had arrived would keep waiting on widths
-            that never would, and the failure was reported against the body. They
-            are checked after, and a width that did not take is worth saying so
-            without pretending the body was lost.
+            Only the body. Widths are checked after: a width that did not take is
+            worth saying so without pretending the body was lost.
             """
-            doc = await self._document_content(doc_id)
-            return to_markdown(doc) == wanted
+            return to_markdown(await self._document_content(doc_id)) == wanted
 
+        url, name, token = await self._collab("article", str(doc_id))
         try:
-            await replace_article_content(
-                self._cfg, ws, str(doc_id), markdown_to_html(markdown), columns_plan=plan, settled=settled
-            )
-        except KBNotSettledError as exc:
-            # Same failure the caller sees from set_table_widths, phrased once.
+            await collab.apply(url, name, token, lambda fragment: collab.write_body(fragment, doc), settled=settled)
+        except collab.CollabError as exc:
             raise KBError(str(exc)) from exc
         if table_widths is not None:
             stored = [t.widths for t in read_tables(await self._document_content(doc_id))]
@@ -562,49 +601,44 @@ class WeeekKB:
     ) -> dict:
         """Set column widths on a document's tables, leaving their content alone.
 
-        The widths are read back afterwards and compared with what was asked for:
-        the edit travels over a collaborative websocket, so a dropped sync has to
-        surface as an error rather than as a success with nothing changed.
+        Written straight into the document's Y.Doc, then read back and compared
+        with what was asked for: a dropped sync has to surface as an error rather
+        than as a success with nothing changed.
         """
-        ws = await self._workspace()
-        if not self._cfg.storage_state_path.exists():
-            await self._refresh_session()
         tables = read_tables(await self._document_content(doc_id))
         plan = widths_plan(tables, table_index, widths, fit=fit)
+        expected: list[list[int] | None] = []
 
-        async def settled(applied: list[list[int] | None] | None) -> bool:
-            """Whether Weeek itself now serves the widths the editor was given."""
-            if applied is None:
-                return True
+        def size(fragment) -> None:
+            bodies = [collab.measure_body(body) for body in collab.table_bodies(fragment)]
+            measured = [MeasuredTable(columns=columns, raw_columns=raw) for columns, raw in bodies]
+            resolved = resolve_columns(measured, plan, FALLBACK_CONTENT_WIDTH)
+            expected.extend([[e["width"] for e in entries] if entries else None for entries in resolved])
+            for body, entries in zip(collab.table_bodies(fragment), resolved, strict=True):
+                if entries is not None:
+                    body.attributes["columns"] = json.dumps(entries)
+
+        async def settled() -> bool:
             current = [t.widths for t in read_tables(await self._document_content(doc_id))]
-            return all(want is None or (i < len(current) and current[i] == want) for i, want in enumerate(applied))
+            return all(want is None or (i < len(current) and current[i] == want) for i, want in enumerate(expected))
 
+        url, name, token = await self._collab("article", str(doc_id))
         try:
-            result = await set_table_columns(self._cfg, ws, str(doc_id), plan, settled=settled)
-        except (KBEditDiscardedError, KBNotSettledError) as exc:
+            await collab.apply(url, name, token, size, settled=settled)
+        except collab.CollabError as exc:
             raise KBError(str(exc)) from exc
 
         stored = [t.widths for t in read_tables(await self._document_content(doc_id))]
-        expected: list[list[int] | None] = result["expected"]
         for i, want in enumerate(expected):
             if want is not None and (i >= len(stored) or stored[i] != want):
                 raise KBError(
                     f"Table {i} was set to {want} but Weeek now reports "
-                    f"{stored[i] if i < len(stored) else 'no such table'}. "
-                    f"Yjs write: {result.get('yjs')}."
+                    f"{stored[i] if i < len(stored) else 'no such table'}."
                 )
         return {
-            "tables": result["tables"],
-            "changed": result["changed"],
-            "content_width": result["available"],
-            "page": result.get("page"),
-            "sizing": result.get("sizing"),
-            "timings": result.get("timings"),
-            "stuck": result.get("stuck"),
-            "layout": result.get("layout"),
-            "drags": result.get("drags"),
-            "editor_api": result.get("editor_api"),
-            "yjs": result.get("yjs"),
+            "tables": len(expected),
+            "changed": sum(1 for want in expected if want is not None),
+            "content_width": FALLBACK_CONTENT_WIDTH,
             "widths": stored,
         }
 

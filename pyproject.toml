@@ -1,7 +1,7 @@
 [project]
 name = "weeek-mcp"
 version = "0.2.0"
-description = "MCP server for Weeek: task management via the public API and knowledge base via Playwright."
+description = "MCP server for Weeek: task management via the public API, knowledge base via its internal API and collaborative editor channel."
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Aleksey Dalekin", email = "adalekin@gmail.com" }]
@@ -26,7 +26,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-kb = ["playwright>=1.44.0"]
+kb = ["playwright>=1.44.0", "pycrdt>=0.10.0", "websockets>=12.0"]
 
 [project.scripts]
 weeek-mcp = "weeek_mcp.server:main"
