@@ -173,3 +173,27 @@ async def test_a_filtered_export_prunes_nothing(kb, monkeypatch, tmp_path):
 
     assert result["removed"] == 0
     assert (root / "Metrics.md").exists()
+
+
+async def test_hidden_folders_are_never_swept(kb, monkeypatch, tmp_path):
+    """A snapshot of an earlier export is full of our front matter — and is not ours."""
+    root = tmp_path / "export"
+
+    _serve(kb, monkeypatch, [_doc("13", "Providers", "Tech"), _doc("24", "Roadmap")])
+    await kb.export_documents(str(root))
+
+    # The kind of copy someone keeps before a risky run.
+    backup = root / ".before-changes"
+    backup.mkdir()
+    (backup / "Providers.md").write_text("---\nweeek_id: 13\n---\n\nold body\n")
+    nested = backup / "Tech"
+    nested.mkdir()
+    (nested / "Roadmap.md").write_text("---\nweeek_id: 24\n---\n\nold body\n")
+
+    _serve(kb, monkeypatch, [_doc("24", "Roadmap")])
+    result = await kb.export_documents(str(root))
+
+    assert result["removed"] == 1  # only the live stale file, none of the backup
+    assert result["pruned"] == [str(root / "Tech" / "Providers.md")]
+    assert (backup / "Providers.md").exists()
+    assert (nested / "Roadmap.md").exists()

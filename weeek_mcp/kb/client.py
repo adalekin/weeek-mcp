@@ -121,12 +121,17 @@ def _prune_export(root: Path, kept: set[Path]) -> list[str]:
     away from the knowledge base it is supposed to mirror.
 
     Only files carrying our own front matter are candidates. Anything else in the
-    folder belongs to the user and is left alone.
+    folder belongs to the user and is left alone, and so is everything under a
+    hidden folder: a snapshot of an earlier export kept in ``.backup/`` is full of
+    our own front matter, and sweeping it would be exactly the data loss this
+    function exists to avoid.
     """
     removed: list[str] = []
     for path in sorted(root.rglob("*.md")):
         if path in kept or not path.is_file():
             continue
+        if any(part.startswith(".") for part in path.relative_to(root).parts):
+            continue  # hidden: the user's, not part of the mirror
         try:
             head = path.read_text(errors="replace")[:_STAMP_PROBE]
         except OSError:
@@ -138,6 +143,8 @@ def _prune_export(root: Path, kept: set[Path]) -> list[str]:
 
     # Deepest first, so a folder emptied by the loop above can go too.
     for folder in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if any(part.startswith(".") for part in folder.relative_to(root).parts):
+            continue
         if folder.is_dir() and not any(folder.iterdir()):
             folder.rmdir()
 
