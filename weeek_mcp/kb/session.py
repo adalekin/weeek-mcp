@@ -427,6 +427,33 @@ _APPLY_COLUMNS_JS = (
 # The resize handles are real elements the plugin listens on: `left` gives where
 # each column boundary sits. Reported with page coordinates so the mouse can be
 # driven to them, which is the one route the plugin treats as authoritative.
+# What the editor actually exposes. `editor.commands` is a Proxy and enumerates
+# as empty, which is not the same as having no commands — the real map lives on
+# the extension manager. Read once, so the table extension can be asked properly
+# instead of argued with through its attributes.
+_EXTENSIONS_JS = (
+    """({selector}) => {"""
+    + _FIND_EDITOR_JS
+    + """
+    const editor = findEditor(selector);
+    if (!editor) return {ok: false, error: 'editor instance not found'};
+    const mgr = editor.extensionManager || {};
+    const commands = Object.keys(mgr.commands || {});
+    const extensions = (mgr.extensions || []).map(e => e.name);
+    const table = (mgr.extensions || []).filter(e => /table|column|cell|row/i.test(e.name || ''));
+    const details = table.map(e => ({
+        name: e.name,
+        options: Object.keys(e.options || {}),
+        attributes: Object.keys((e.config && e.config.addAttributes) ? e.config.addAttributes.call({}) || {} : {}),
+        commandsSource: e.config && e.config.addCommands ? String(e.config.addCommands).slice(0, 4000) : null,
+    }));
+    const plugins = (editor.view && editor.view.state ? editor.view.state.plugins : [])
+        .map(p => (p.key || '').toString());
+    return {ok: true, commands, extensions, table: details, plugins};
+}"""
+)
+
+
 _HANDLES_JS = (
     """({selector, index}) => {"""
     + _FIND_EDITOR_JS
@@ -718,6 +745,7 @@ async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None], set
         # fixed cost, and what is left of the client's timeout is the budget the
         # sync has to land in. Without these numbers a failure says nothing.
         result["drags"] = drags or None
+        result["editor_api"] = await page.evaluate(_EXTENSIONS_JS, {"selector": _KB_EDITOR})
         result["after_drag"] = result.get("after_drag")
         result["timings"] = {
             "open_s": round(opened, 1),
