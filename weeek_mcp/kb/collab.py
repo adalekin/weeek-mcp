@@ -23,7 +23,17 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any
 
-from pycrdt import Doc, XmlElement, XmlFragment, XmlText
+try:
+    from pycrdt import Doc, XmlElement, XmlFragment, XmlText
+except ModuleNotFoundError:  # the [kb] extra is not installed
+    # Writing needs these; reading, listing and searching do not, and they share
+    # a module with the client. So a missing dependency has to cost the writes
+    # only, with a message that says what to install — not the whole KB.
+    Doc = XmlElement = XmlFragment = XmlText = None  # type: ignore[assignment,misc]
+
+_MISSING_CRDT = (
+    "Editing a body needs the collaborative libraries: install weeek-mcp[kb] (pycrdt, websockets). Nothing was written."
+)
 
 # The Y.Doc field y-prosemirror binds the editor to.
 FRAGMENT = "prosemirror"
@@ -160,6 +170,8 @@ def _element(node: dict, pending: list[tuple[XmlText, list[dict]]]) -> XmlElemen
 
 def write_body(fragment: XmlFragment, doc: dict) -> None:
     """Replace everything in ``fragment`` with the ProseMirror document ``doc``."""
+    if XmlElement is None:
+        raise CollabError(_MISSING_CRDT)
     pending: list[tuple[XmlText, list[dict]]] = []
     elements = [
         element
@@ -216,7 +228,12 @@ async def open_document(url: str, name: str, token: str):
     The connection stays open for as long as the caller holds it, which is what
     lets a write be confirmed before the socket goes away.
     """
-    import websockets
+    if Doc is None:
+        raise CollabError(_MISSING_CRDT)
+    try:
+        import websockets
+    except ModuleNotFoundError as exc:
+        raise CollabError(_MISSING_CRDT) from exc
 
     doc: Doc = Doc()
     try:
