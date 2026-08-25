@@ -30,11 +30,8 @@ Settled = Callable[[list[list[int] | None] | None], Awaitable[bool]]
 _LOGIN_TIMEOUT = 45.0  # hard ceiling so a stuck browser fails loudly instead of hanging
 _EDIT_TIMEOUT = 60.0  # a paste that also restores table widths waits on two syncs
 _SETTLE_POLL_MS = 500  # how often the server is asked whether the sync arrived
-_APPLY_ATTEMPTS = 1  # one dispatch, given room to leave — repeats bought nothing and cost the
-# has to stay inside the caller's 60s and a browser start already costs 15 of them
-_APPLY_RECHECK_MS = 4000  # what the original code waited after a dispatch. Trimming this to
-# fit a timeout is what stopped the widths reaching the server: y-prosemirror needs the time
-# to turn the transaction into an update and hand it to the provider
+_APPLY_ATTEMPTS = 2  # the configuration two width writes actually landed under today
+_APPLY_RECHECK_MS = 1200
 _APPLY_RETRY_MS = 400  # breathing room before setting it once more
 _SCROLL_SETTLE_MS = 250  # let the editor finish reacting to the viewport move
 _DRAG_SETTLE_MS = 600  # let the plugin write the attribute after a handle is dropped
