@@ -535,7 +535,7 @@ class WeeekKB:
                 raise KBError(
                     f"Table {i} was set to {want} but Weeek now reports "
                     f"{stored[i] if i < len(stored) else 'no such table'}. "
-                    f"Editor API: {result.get('editor_api')}."
+                    f"Yjs write: {result.get('yjs')}."
                 )
         return {
             "tables": result["tables"],
@@ -548,6 +548,7 @@ class WeeekKB:
             "layout": result.get("layout"),
             "drags": result.get("drags"),
             "editor_api": result.get("editor_api"),
+            "yjs": result.get("yjs"),
             "widths": stored,
         }
 

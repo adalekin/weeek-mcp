@@ -454,6 +454,53 @@ _EXTENSIONS_JS = (
 )
 
 
+# The document is a Yjs document; ProseMirror is its view. Dispatching a
+# transaction leaves it to y-prosemirror to notice what changed, and for an
+# attribute on a node whose content is untouched it frequently notices nothing —
+# the editor shows the new width, the Y document never hears about it, and the
+# server keeps serving the old one, correctly.
+#
+# So write where the truth is. The y-sync plugin state carries the Y fragment
+# the editor is bound to; setting the attribute on the matching Y element there
+# both reaches the server and comes back into the editor by itself.
+_YJS_COLUMNS_JS = (
+    """({selector, columns}) => {"""
+    + _FIND_EDITOR_JS
+    + """
+    const editor = findEditor(selector);
+    if (!editor) return {ok: false, error: 'editor instance not found'};
+    const view = editor.view;
+    const plugin = view.state.plugins.find(p => String(p.key).startsWith('y-sync'));
+    if (!plugin) return {ok: false, error: 'no y-sync plugin'};
+    const state = plugin.getState(view.state);
+    const fragment = state && (state.type || (state.binding && state.binding.type));
+    if (!fragment) return {ok: false, error: 'no bound fragment'};
+
+    const bodies = [];
+    const walk = (node) => {
+        if (!node || typeof node.toArray !== 'function') return;
+        if (node.nodeName === 'table_body') bodies.push(node);
+        node.toArray().forEach(walk);
+    };
+    fragment.toArray().forEach(walk);
+    if (bodies.length !== columns.length) {
+        return {ok: false, error: `${bodies.length} table(s) in the Y document, ${columns.length} planned`};
+    }
+
+    const doc = fragment.doc;
+    const write = () => {
+        columns.forEach((spec, i) => {
+            if (spec) bodies[i].setAttribute('columns', JSON.stringify(spec));
+        });
+    };
+    if (doc && typeof doc.transact === 'function') doc.transact(write);
+    else write();
+
+    return {ok: true, tables: bodies.length, after: bodies.map(b => b.getAttribute('columns') || null)};
+}"""
+)
+
+
 _HANDLES_JS = (
     """({selector, index}) => {"""
     + _FIND_EDITOR_JS
@@ -669,6 +716,7 @@ async def _apply_columns(page, selector: str, plan: list[dict | None]) -> dict:
     return {
         "tables": applied["tables"],
         "changed": applied["changed"],
+        "resolved": columns,
         "stuck": applied.get("stuck"),
         "layout": applied.get("layout"),
         "editor_after": settled_in_editor.get("after"),
@@ -729,6 +777,20 @@ async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None], set
         # the reason this never gets reported. That has happened twice already.
         editor_api = await page.evaluate(_EXTENSIONS_JS, {"selector": _KB_EDITOR})
         result = await _apply_columns(page, _KB_EDITOR, plan)
+        # The transaction above is not what makes this stick; the Y document is.
+        columns = [
+            [
+                {"id": c["id"], "width": c["width"], "color": c["color"], "backgroundColor": c["backgroundColor"]}
+                for c in cols
+            ]
+            if cols
+            else None
+            for cols in (result.get("resolved") or [])
+        ]
+        yjs = await page.evaluate(_YJS_COLUMNS_JS, {"selector": _KB_EDITOR, "columns": columns})
+        log(f"size tables: yjs write {yjs}")
+        result["yjs"] = yjs
+        await page.wait_for_timeout(1200)
         applied = time.monotonic() - t0
         log(f"size tables: {result['changed']}/{result['tables']} in {applied:.1f}s")
         # No dragging: the handles are only in the markup once a pointer has been
@@ -746,7 +808,7 @@ async def _size_tables(cfg: Config, page_path: str, plan: list[dict | None], set
             try:
                 waited = await _wait_until_settled(page, settled, result["expected"], "table widths", log)
             except KBNotSettledError as exc:
-                raise KBNotSettledError(f"{exc} Editor API: {editor_api}.") from exc
+                raise KBNotSettledError(f"{exc} Yjs write: {result.get('yjs')}.") from exc
         # Where the time goes, reported to the caller: the browser start is a
         # fixed cost, and what is left of the client's timeout is the budget the
         # sync has to land in. Without these numbers a failure says nothing.
