@@ -44,6 +44,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import httpx
 
@@ -734,7 +735,7 @@ class WeeekKB:
             f"/ws/{ws}/tm/tasks/{task_id}/comments",
             {"content": markdown_to_doc(markdown)},
         )
-        return data.get("comment") or data
+        return cast(dict, data.get("comment") or data)
 
     async def update_task_comment(self, task_id: int, comment_id: int, markdown: str) -> dict:
         """Rewrite a comment in place, so the thread keeps one entry instead of gaining a second."""
@@ -743,7 +744,7 @@ class WeeekKB:
             f"/ws/{ws}/tm/tasks/{task_id}/comments/{comment_id}",
             {"content": markdown_to_doc(markdown)},
         )
-        return data.get("comment") or data
+        return cast(dict, data.get("comment") or data)
 
     async def delete_task_comment(self, task_id: int, comment_id: int) -> None:
         """Remove a comment. Weeek has no trash for these — it is gone."""
