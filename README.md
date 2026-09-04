@@ -4,13 +4,36 @@
 [![PyPI version](https://img.shields.io/pypi/v/weeek-mcp.svg)](https://pypi.org/project/weeek-mcp/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+**Language:** English · [Русский](https://github.com/adalekin/weeek-mcp/blob/main/README.ru.md)
+
 An [MCP](https://modelcontextprotocol.io) server for [Weeek](https://weeek.net): manage **tasks** through the public REST API and browse the **knowledge base** through Weeek's internal API, exposed as MCP **Resources** so you can search and select KB documents as content (not links) from your MCP client.
+
+## Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Tools](#tools)
+- [Knowledge base in Claude context](#knowledge-base-in-claude-context)
+- [Status & limitations](#status--limitations)
+- [Development](#development)
+- [License](#license)
 
 ## Features
 
-- **Task management** (public REST API): projects, boards, board columns, and full task lifecycle — create, update, complete, move between columns, assign/unassign members.
-- **Knowledge base** (full CRUD): Weeek has no public KB API, so the server calls Weeek's **internal JSON API** (`api.weeek.net/ws/{id}/kb/...`) using cookies from a saved browser login. Documents are rendered to Markdown and published as MCP **Resources** (`weeek-kb://<id>`). Read/list/search/create/rename/delete go over the JSON API; **in-place body editing** speaks Weeek's collaborative protocol directly (Hocuspocus/Yjs), because bodies live in a shared document the REST API only serves a snapshot of. Content is converted between Markdown and Weeek's ProseMirror format automatically.
-- **Capability-aware**: task tools appear when an API token is set; KB tools/resources appear when login credentials or a cached session are present.
+### Tasks and boards
+
+Public REST API — projects, boards, board columns, and the full task lifecycle: create, update, complete, move between columns, assign and unassign members.
+
+### Knowledge base
+
+Full CRUD. Weeek has no public KB API, so the server calls Weeek's **internal JSON API** (`api.weeek.net/ws/{id}/kb/...`) using cookies from a saved browser login. Documents are rendered to Markdown and published as MCP **Resources** (`weeek-kb://<id>`). Read/list/search/create/rename/delete go over the JSON API; **in-place body editing** speaks Weeek's collaborative protocol directly (Hocuspocus/Yjs), because bodies live in a shared document the REST API only serves a snapshot of. Content is converted between Markdown and Weeek's ProseMirror format automatically.
+
+### Capability-aware
+
+Task tools appear when an API token is set; KB tools and resources appear when login credentials or a cached session are present.
 
 ## Requirements
 
@@ -83,69 +106,100 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-### Tools
+### Other MCP clients
 
-**Tasks:** `weeek_whoami`, `weeek_list_members`, `weeek_list_projects`,
-`weeek_list_boards`, `weeek_list_board_columns`, `weeek_list_tasks`,
-`weeek_get_task`, `weeek_create_task`, `weeek_update_task`, `weeek_complete_task`,
-`weeek_uncomplete_task`, `weeek_delete_task`, `weeek_move_task`,
-`weeek_set_assignees`, `weeek_remove_assignees`, `weeek_set_task_parent`,
-`weeek_add_task_to_project`, `weeek_remove_task_from_project`, `weeek_set_watchers`,
-`weeek_remove_watchers`, `weeek_task_timer`, `weeek_manage_time_entry`,
-`weeek_upload_attachment`, `weeek_get_attachment`, `weeek_list_custom_fields`,
-`weeek_list_task_comments`, `weeek_add_task_comment`, `weeek_update_task_comment`,
-`weeek_delete_task_comment`.
+`weeek-mcp` is a plain stdio server, so it works with any MCP client that launches
+servers as a local subprocess: Cursor, Windsurf, Cline, Continue, Zed, VS Code
+(Copilot agent mode), Gemini CLI, Goose, LibreChat, and others, plus your own agents
+built on an MCP SDK. The command and environment variables are the same as above —
+only the config format and its location differ.
 
-**Workspace admin:** `weeek_manage_tags`, `weeek_manage_projects`,
-`weeek_manage_boards`, `weeek_manage_board_columns`, `weeek_manage_portfolios`,
-`weeek_manage_custom_fields`. These take an `action` (create/update/delete/…) rather
-than one tool per operation — the CRUD is regular and the tool list stays readable.
-Custom fields live per board, per project or workspace-wide, so that tool takes a
-`scope` (`global`/`project`/`board`) plus `scope_id`.
+Cursor (`~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project) uses the same shape
+as Claude Desktop:
 
-Priority takes either Weeek's number or its label — `0` low (Низкий), `1` medium
-(Средний), `2` high (Высокий), `3` hold (Замороженный).
+```json
+{
+  "mcpServers": {
+    "weeek": {
+      "command": "weeek-mcp",
+      "env": { "WEEEK_API_TOKEN": "..." }
+    }
+  }
+}
+```
 
-Custom fields are set with `custom_fields`: on an existing task by field name or id
-(`{"Ссылка на фичу": "https://…"}`, `null` clears a field, a select takes the option
-name or id), on `weeek_create_task` by id only — `weeek_list_custom_fields` lists
-them. A field belongs to the projects it was added to, and Weeek stores nothing
-when you write to one it doesn't cover, so the write is verified and reported.
+VS Code (`.vscode/mcp.json`) uses a `servers` key and an explicit `type`:
 
-Descriptions are editable on an existing task: `weeek_update_task` takes
-`description` as Markdown (empty string clears it). Weeek's REST API only accepts a
-description on create — `PUT /tm/tasks/{id}` has no such field — because
-descriptions sync through the same collaborative channel as KB document bodies, so
-this writes into that channel and needs the knowledge base session. `weeek_create_task` still takes its `description` as HTML, which
-is what that endpoint stores.
+```json
+{
+  "servers": {
+    "weeek": {
+      "type": "stdio",
+      "command": "weeek-mcp",
+      "env": { "WEEEK_API_TOKEN": "..." }
+    }
+  }
+}
+```
 
-Comments are read with `weeek_list_task_comments`, written with `weeek_add_task_comment`
-and rewritten in place with `weeek_update_task_comment` (all Markdown) — an edited comment
-beats posting a correction under the original. `weeek_delete_task_comment` removes one for
-good; Weeek keeps no trash for comments. Weeek's public API has no comments at all, so
-these go through its web API on the knowledge base session; no browser is launched, only
-the saved cookies.
+> **On the knowledge base:** task tools and `weeek_kb_*` are ordinary MCP tools and
+> work almost everywhere. Pulling documents in through an attachment menu relies on MCP
+> **Resources**, which fewer clients surface. Where they aren't supported, read the KB
+> with `weeek_kb_read`/`weeek_kb_search` — the content still lands in context. MCP and
+> resources support moves fast per client; check the client's docs before relying on it.
 
-**Knowledge base:** `weeek_kb_search`, `weeek_kb_list`, `weeek_kb_read`,
-`weeek_kb_create`, `weeek_kb_update`, `weeek_kb_table_widths`, `weeek_kb_icons`,
-`weeek_kb_delete`.
+## Tools
+
+### Tasks
+
+| Group | Tools |
+| --- | --- |
+| Reading & navigation | `weeek_whoami`, `weeek_list_members`, `weeek_list_projects`, `weeek_list_boards`, `weeek_list_board_columns`, `weeek_list_tasks`, `weeek_get_task` |
+| Task lifecycle | `weeek_create_task`, `weeek_update_task`, `weeek_complete_task`, `weeek_uncomplete_task`, `weeek_delete_task`, `weeek_move_task` |
+| Assignees, watchers, hierarchy | `weeek_set_assignees`, `weeek_remove_assignees`, `weeek_set_watchers`, `weeek_remove_watchers`, `weeek_set_task_parent`, `weeek_add_task_to_project`, `weeek_remove_task_from_project` |
+| Time & attachments | `weeek_task_timer`, `weeek_manage_time_entry`, `weeek_upload_attachment`, `weeek_get_attachment` |
+| Fields & comments | `weeek_list_custom_fields`, `weeek_list_task_comments`, `weeek_add_task_comment`, `weeek_update_task_comment`, `weeek_delete_task_comment` |
+
+### Workspace admin
+
+`weeek_manage_tags`, `weeek_manage_projects`, `weeek_manage_boards`, `weeek_manage_board_columns`, `weeek_manage_portfolios`, `weeek_manage_custom_fields`.
+
+These take an `action` (create/update/delete/…) rather than one tool per operation — the CRUD is regular and the tool list stays readable. Custom fields live per board, per project or workspace-wide, so that tool takes a `scope` (`global`/`project`/`board`) plus `scope_id`.
+
+### Knowledge base
+
+| Group | Tools |
+| --- | --- |
+| Reading | `weeek_kb_search`, `weeek_kb_list`, `weeek_kb_read` |
+| Writing | `weeek_kb_create`, `weeek_kb_update`, `weeek_kb_delete` |
+| Formatting | `weeek_kb_table_widths`, `weeek_kb_icons` |
 
 > `weeek_kb_update` with new content writes into the document's shared Yjs document over
 > Weeek's collaborative websocket, because that — not REST — is where bodies are saved.
 > No browser is involved and the document id is preserved.
 
-Tables have one size to set: the pixel width of each column (minimum 90). New tables
-are fitted to the document's content column (~676px) instead of Weeek's 180px-per-column
-default, and existing widths are carried across a `weeek_kb_update` — a table that gains
-or loses a column is re-fitted. `weeek_kb_table_widths` sets them explicitly:
-`widths: [300, 200, 176]` for exact sizes, or `fit: true` to spread a table across the
-content column.
+### Behavior
 
-Documents can carry an icon: pass `icon` to `weeek_kb_create`/`weeek_kb_update` as a
-single emoji (`🚀`) or as one of Weeek's built-in icon names (`weeek_kb_icons` lists
-them); an empty `icon` removes it. Listings report the icon a document currently has.
+**Priorities.** Take either Weeek's number or its label:
 
-### Knowledge base → Claude Desktop Context
+| Number | Label |
+| --- | --- |
+| `0` | low (Низкий) |
+| `1` | medium (Средний) |
+| `2` | high (Высокий) |
+| `3` | hold (Замороженный) |
+
+**Custom fields.** Set with `custom_fields`: on an existing task by field name or id (`{"Ссылка на фичу": "https://…"}`, `null` clears a field, a select takes the option name or id), on `weeek_create_task` by id only — `weeek_list_custom_fields` lists them. A field belongs to the projects it was added to, and Weeek stores nothing when you write to one it doesn't cover, so the write is verified and reported.
+
+**Descriptions.** Editable on an existing task: `weeek_update_task` takes `description` as Markdown (empty string clears it). Weeek's REST API only accepts a description on create — `PUT /tm/tasks/{id}` has no such field — because descriptions sync through the same collaborative channel as KB document bodies, so this writes into that channel and needs the knowledge base session. `weeek_create_task` still takes its `description` as HTML, which is what that endpoint stores.
+
+**Comments.** Read with `weeek_list_task_comments`, written with `weeek_add_task_comment` and rewritten in place with `weeek_update_task_comment` (all Markdown) — an edited comment beats posting a correction under the original. `weeek_delete_task_comment` removes one for good; Weeek keeps no trash for comments. Weeek's public API has no comments at all, so these go through its web API on the knowledge base session; no browser is launched, only the saved cookies.
+
+**Tables.** One size to set: the pixel width of each column (minimum 90). New tables are fitted to the document's content column (~676px) instead of Weeek's 180px-per-column default, and existing widths are carried across a `weeek_kb_update` — a table that gains or loses a column is re-fitted. `weeek_kb_table_widths` sets them explicitly: `widths: [300, 200, 176]` for exact sizes, or `fit: true` to spread a table across the content column.
+
+**Icons.** Pass `icon` to `weeek_kb_create`/`weeek_kb_update` as a single emoji (`🚀`) or as one of Weeek's built-in icon names (`weeek_kb_icons` lists them); an empty `icon` removes it. Listings report the icon a document currently has.
+
+## Knowledge base in Claude context
 
 Each KB document is published as an MCP **Resource** (`weeek-kb://<id>`). In Claude
 Desktop you add them from the attachment (**+**) menu of the connected server — browse
