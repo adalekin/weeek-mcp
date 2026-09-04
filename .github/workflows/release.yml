@@ -25,6 +25,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.9.24"
 
       - name: Verify tag matches package version
         run: |
@@ -46,4 +48,4 @@ jobs:
         run: uv run --isolated --no-project --with dist/*.tar.gz python -c "import ${{ env.PACKAGE_IMPORT }}"
 
       - name: Publish to PyPI
-        run: uv publish
+        run: uv publish --trusted-publishing always

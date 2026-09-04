@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/adalekin/weeek-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/adalekin/weeek-mcp/actions/workflows/ci.yml)
 [![PyPI version](https://img.shields.io/pypi/v/weeek-mcp.svg)](https://pypi.org/project/weeek-mcp/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/adalekin/weeek-mcp/blob/main/LICENSE)
 
 **Language:** English · [Русский](https://github.com/adalekin/weeek-mcp/blob/main/README.ru.md)
 
@@ -216,26 +216,26 @@ content**, not a link.
 - **Task tools** follow Weeek's published OpenAPI spec.
 - **Knowledge base** uses Weeek's **internal, undocumented** API (`/ws/{id}/kb/...`). It is
   not covered by any stability guarantee and may change without notice; if KB calls start
-  failing, the endpoints in [`weeek_mcp/kb/client.py`](weeek_mcp/kb/client.py) are the place
+  failing, the endpoints in [`weeek_mcp/kb/client.py`](https://github.com/adalekin/weeek-mcp/blob/main/weeek_mcp/kb/client.py) are the place
   to look. Login automation targets Weeek's two-step web form
-  ([`weeek_mcp/kb/session.py`](weeek_mcp/kb/session.py)); accounts with 2FA/captcha/SSO
+  ([`weeek_mcp/kb/session.py`](https://github.com/adalekin/weeek-mcp/blob/main/weeek_mcp/kb/session.py)); accounts with 2FA/captcha/SSO
   should seed the session with `weeek-mcp-login` instead.
 - Document content is ProseMirror/TipTap JSON, converted to/from Markdown by
-  [`weeek_mcp/kb/prosemirror.py`](weeek_mcp/kb/prosemirror.py). Editing an existing body
+  [`weeek_mcp/kb/prosemirror.py`](https://github.com/adalekin/weeek-mcp/blob/main/weeek_mcp/kb/prosemirror.py). Editing an existing body
   goes through Weeek's collaborative channel (there is no REST content-write):
-  [`weeek_mcp/kb/collab.py`](weeek_mcp/kb/collab.py) speaks the Hocuspocus protocol,
+  [`weeek_mcp/kb/collab.py`](https://github.com/adalekin/weeek-mcp/blob/main/weeek_mcp/kb/collab.py) speaks the Hocuspocus protocol,
   authenticates with a per-socket ticket, and replaces the `prosemirror` fragment of the
   document's Y.Doc. Authoring covers the common Markdown subset (headings, paragraphs, lists,
   bold/inline code, code blocks, quotes, rules); rich cases like nested lists and tables
   are simplified.
 - Table column widths live on the `table_body` node, as a JSON string, and are written
-  with the body rather than after it ([`weeek_mcp/kb/tables.py`](weeek_mcp/kb/tables.py)). Cell colors and per-column colors
+  with the body rather than after it ([`weeek_mcp/kb/tables.py`](https://github.com/adalekin/weeek-mcp/blob/main/weeek_mcp/kb/tables.py)). Cell colors and per-column colors
   are stored alongside the widths but are not exposed as tools yet.
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests, and pull requests.
+See [CONTRIBUTING.md](https://github.com/adalekin/weeek-mcp/blob/main/CONTRIBUTING.md) for setup, tests, and pull requests.
 
 ## License
 
-This project is licensed under the MIT License — see [LICENSE](LICENSE).
+This project is licensed under the MIT License — see [LICENSE](https://github.com/adalekin/weeek-mcp/blob/main/LICENSE).
