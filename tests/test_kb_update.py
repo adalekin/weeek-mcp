@@ -38,7 +38,7 @@ async def _done(value):
 def kb(monkeypatch, tmp_path):
     server = FakeServer(OLD)
     state = tmp_path / "storage_state.json"
-    state.write_text("{}")
+    state.write_text("{}", encoding="utf-8")
 
     class Cfg:
         storage_state_path = state
@@ -121,7 +121,7 @@ def _with_widths(markdown, widths):
 def sized(monkeypatch, tmp_path):
     """A client whose one document holds a single 2x2 table, sized 338/338."""
     state = tmp_path / "storage_state.json"
-    state.write_text("{}")
+    state.write_text("{}", encoding="utf-8")
 
     class Cfg:
         storage_state_path = state

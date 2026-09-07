@@ -42,6 +42,10 @@ jobs:
 
       - name: Pytest
         # Knowledge base (Playwright) tests need a live login and are not run in CI.
+        # PYTHONWARNDEFAULTENCODING makes unspecified-encoding text I/O an error
+        # (see filterwarnings in pyproject.toml).
+        env:
+          PYTHONWARNDEFAULTENCODING: "1"
         run: uv run --python ${{ matrix.python-version }} pytest
 
       - name: Build

@@ -22,9 +22,9 @@ def make_logger(log_path: Path | None, tag: str):
     def _log(msg: str) -> None:
         line = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [{tag}] {msg}"
         try:
-            with log_path.open("a") as f:
+            with log_path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
-        except OSError:
+        except (OSError, UnicodeError):
             pass
         print(line, file=sys.stderr, flush=True)
 

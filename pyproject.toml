@@ -76,3 +76,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Text I/O without an explicit encoding follows the locale, which on a Russian
+# Windows means cp1251 and a crash on the first character it cannot map. CI runs
+# with PYTHONWARNDEFAULTENCODING=1, which is what makes this filter bite.
+filterwarnings = ["error::EncodingWarning"]

@@ -37,7 +37,7 @@ def load_cookies_into(client, cfg: Config) -> int:
     path = cfg.storage_state_path
     if not path.exists():
         return 0
-    state = json.loads(path.read_text())
+    state = json.loads(path.read_text(encoding="utf-8"))
     count = 0
     for c in state.get("cookies", []):
         if "weeek.net" not in c.get("domain", ""):

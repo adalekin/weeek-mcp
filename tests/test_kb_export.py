@@ -146,11 +146,11 @@ async def test_foreign_files_are_left_alone(kb, monkeypatch, tmp_path):
     """Anything without our front matter belongs to the user."""
     root = tmp_path / "export"
     root.mkdir()
-    (root / "my notes.md").write_text("# mine\n")
-    (root / "README.txt").write_text("mine too\n")
+    (root / "my notes.md").write_text("# mine\n", encoding="utf-8")
+    (root / "README.txt").write_text("mine too\n", encoding="utf-8")
     scratch = root / "scratch"
     scratch.mkdir()
-    (scratch / "thoughts.md").write_text("still mine\n")
+    (scratch / "thoughts.md").write_text("still mine\n", encoding="utf-8")
 
     _serve(kb, monkeypatch, [_doc("24", "Roadmap")])
     result = await kb.export_documents(str(root))
@@ -185,10 +185,10 @@ async def test_hidden_folders_are_never_swept(kb, monkeypatch, tmp_path):
     # The kind of copy someone keeps before a risky run.
     backup = root / ".before-changes"
     backup.mkdir()
-    (backup / "Providers.md").write_text("---\nweeek_id: 13\n---\n\nold body\n")
+    (backup / "Providers.md").write_text("---\nweeek_id: 13\n---\n\nold body\n", encoding="utf-8")
     nested = backup / "Tech"
     nested.mkdir()
-    (nested / "Roadmap.md").write_text("---\nweeek_id: 24\n---\n\nold body\n")
+    (nested / "Roadmap.md").write_text("---\nweeek_id: 24\n---\n\nold body\n", encoding="utf-8")
 
     _serve(kb, monkeypatch, [_doc("24", "Roadmap")])
     result = await kb.export_documents(str(root))
@@ -197,3 +197,37 @@ async def test_hidden_folders_are_never_swept(kb, monkeypatch, tmp_path):
     assert result["pruned"] == [str(root / "Tech" / "Providers.md")]
     assert (backup / "Providers.md").exists()
     assert (nested / "Roadmap.md").exists()
+
+
+async def test_a_legacy_file_in_the_target_folder_does_not_stop_the_export(kb, monkeypatch, tmp_path):
+    """Before we passed an encoding, exports were written in the host locale.
+
+    A Windows box is left holding cp1251 files; reading them back as strict UTF-8
+    would abort the very export that is supposed to replace them.
+    """
+    root = tmp_path / "export"
+    root.mkdir()
+    legacy = root / "Roadmap.md"
+    legacy.write_bytes("---\ntitle: Roadmap\nweeek_id: 24\n---\n\nстарое тело\n".encode("cp1251"))
+
+    _serve(kb, monkeypatch, [_doc("24", "Roadmap")])
+    result = await kb.export_documents(str(root))
+
+    assert result["exported"] == 1
+    assert legacy.read_text(encoding="utf-8").endswith("body of 24")
+
+
+async def test_a_legacy_file_for_a_gone_document_is_still_pruned(kb, monkeypatch, tmp_path):
+    """The stamp is ASCII, so a garbled decode still identifies the file as ours."""
+    root = tmp_path / "export"
+    root.mkdir()
+    stale = root / "Providers.md"
+    stale.write_bytes("---\nweeek_id: 13\n---\n\nстарое тело\n".encode("cp1251"))
+    mine = root / "notes.md"
+    mine.write_bytes("мои заметки\n".encode("cp1251"))
+
+    _serve(kb, monkeypatch, [_doc("24", "Roadmap")])
+    result = await kb.export_documents(str(root))
+
+    assert result["pruned"] == [str(stale)]
+    assert mine.exists()

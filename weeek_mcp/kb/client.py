@@ -138,7 +138,7 @@ def _prune_export(root: Path, kept: set[Path]) -> list[str]:
         if any(part.startswith(".") for part in path.relative_to(root).parts):
             continue  # hidden: the user's, not part of the mirror
         try:
-            head = path.read_text(errors="replace")[:_STAMP_PROBE]
+            head = path.read_text(encoding="utf-8", errors="replace")[:_STAMP_PROBE]
         except OSError:
             continue
         if not _EXPORT_STAMP.search(head):
@@ -688,11 +688,14 @@ class WeeekKB:
             folder.mkdir(parents=True, exist_ok=True)
 
             path = folder / f"{_safe_name(d.title)}.md"
-            if path.exists() and f"weeek_id: {d.id}\n" not in path.read_text():
+            # errors="replace": the file may predate this export — an older version
+            # of us wrote it in the host locale — and the stamp we look for is ASCII,
+            # so a garbled decode still answers the question.
+            if path.exists() and f"weeek_id: {d.id}\n" not in path.read_text(encoding="utf-8", errors="replace"):
                 path = folder / f"{_safe_name(d.title)}-{d.id}.md"  # title collision
 
             front = f"---\ntitle: {d.title}\nweeek_id: {d.id}\nweeek_path: {d.path}\n---\n\n"
-            path.write_text(front + body)
+            path.write_text(front + body, encoding="utf-8")
             written.append(str(path))
             kept.add(path)
 
