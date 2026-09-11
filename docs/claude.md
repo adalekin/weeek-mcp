@@ -64,6 +64,21 @@ weeek-mcp-login
 
 ## 5. Claude Desktop
 
+### Бандл .mcpb
+
+Так проще всего, шаги с 1 по 4 для него не нужны. Скачайте [`weeek-mcp.mcpb`](https://github.com/adalekin/weeek-mcp/releases/latest/download/weeek-mcp.mcpb) из последнего релиза и откройте двойным кликом (или перетащите в **Settings → Extensions**). Desktop спросит API-токен и установит расширение. Python и uv ставить не надо: Desktop запускает сервер своим встроенным uv, и при первом запуске тот сам скачает `weeek-mcp` с PyPI.
+
+Базе знаний всё равно нужен разовый вход из терминала. Для этого поставьте [uv](https://docs.astral.sh/uv/) и выполните:
+
+```bash
+uvx --from "weeek-mcp[kb]" playwright install chromium
+uvx --from "weeek-mcp[kb]" weeek-mcp-login
+```
+
+Потом выключите и включите расширение в **Settings → Extensions**, чтобы сервер подхватил сессию. Email и пароль в настройках расширения необязательны: с ними сервер сам войдёт заново, когда сессия истечёт. При 2FA и SSO это не сработает, тогда повторите `weeek-mcp-login`.
+
+### Через конфиг
+
 Откройте конфиг:
 
 - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`

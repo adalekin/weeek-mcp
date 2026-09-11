@@ -37,6 +37,13 @@ jobs:
             echo "Tag $TAG does not match pyproject.toml version $VERSION"
             exit 1
           fi
+          # The Desktop bundle installs this exact version from PyPI.
+          MANIFEST=$(python3 -c "import json; print(json.load(open('mcpb/manifest.json'))['version'])")
+          PIN=$(python3 -c "import tomllib; print(tomllib.load(open('mcpb/pyproject.toml', 'rb'))['project']['dependencies'][0])")
+          if [ "$MANIFEST" != "$VERSION" ] || [ "$PIN" != "weeek-mcp[kb]==$VERSION" ]; then
+            echo "mcpb/ is out of sync: manifest $MANIFEST, pin $PIN, package $VERSION"
+            exit 1
+          fi
 
       - name: Build sdist and wheel
         run: uv build
@@ -49,3 +56,31 @@ jobs:
 
       - name: Publish to PyPI
         run: uv publish --trusted-publishing always
+
+  bundle:
+    name: Claude Desktop bundle
+    # The bundle installs the release from PyPI, so it ships only once that exists.
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Pack .mcpb
+        run: npx -y @anthropic-ai/mcpb@2.1.2 pack mcpb weeek-mcp.mcpb
+
+      - name: Attach to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --generate-notes
+          gh release upload "$TAG" weeek-mcp.mcpb --clobber

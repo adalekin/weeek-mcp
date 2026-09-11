@@ -37,7 +37,7 @@ Task tools appear when an API token is set; KB tools and resources appear when l
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.10+ (not needed for the [Claude Desktop bundle](#claude-desktop))
 - A Weeek **API token** for task tools (Weeek → Settings → API).
 - For the knowledge base: `weeek-mcp[kb]` plus the Chromium runtime (used for login only), and either login credentials or a session seeded once with `weeek-mcp-login`.
 
@@ -90,7 +90,18 @@ weeek-mcp
 
 ### Claude Desktop
 
-Add to `claude_desktop_config.json`:
+The quickest route is the bundle. Download [`weeek-mcp.mcpb`](https://github.com/adalekin/weeek-mcp/releases/latest/download/weeek-mcp.mcpb) from the latest release and open it, or drag it onto Claude Desktop's Settings → Extensions page. Desktop asks for your API token and installs the extension. You don't need Python or uv for this: Desktop runs the server with its own uv, which fetches `weeek-mcp` from PyPI on first launch.
+
+The knowledge base still needs a one-time sign-in from a terminal, and that part does use [uv](https://docs.astral.sh/uv/):
+
+```bash
+uvx --from "weeek-mcp[kb]" playwright install chromium
+uvx --from "weeek-mcp[kb]" weeek-mcp-login
+```
+
+Then restart the extension (switch it off and on in Settings → Extensions). If you also put your Weeek email and password in the extension settings, the server signs in again by itself when the session expires. That won't work with 2FA or SSO; run `weeek-mcp-login` again instead.
+
+To set it up by hand, add to `claude_desktop_config.json`:
 
 ```json
 {

@@ -1,0 +1,64 @@
+{
+  "manifest_version": "0.4",
+  "name": "weeek-mcp",
+  "display_name": "Weeek",
+  "version": "0.2.1",
+  "description": "Weeek task management and knowledge base",
+  "long_description": "MCP server for Weeek.\n\n- **Tasks**: projects, boards, columns and the full task lifecycle, plus comments, time tracking, watchers, attachments and workspace admin.\n- **Knowledge base**: full CRUD. Documents are exposed as MCP resources, so they can be searched and pulled into context as content rather than links. Bodies convert between Markdown and Weeek's format automatically.\n\nThe knowledge base needs a one-time sign-in from a terminal with `weeek-mcp-login`; see the documentation link.",
+  "author": {
+    "name": "Aleksey Dalekin",
+    "url": "https://github.com/adalekin"
+  },
+  "homepage": "https://github.com/adalekin/weeek-mcp",
+  "documentation": "https://github.com/adalekin/weeek-mcp/blob/main/README.md#claude-desktop",
+  "support": "https://github.com/adalekin/weeek-mcp/issues",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/adalekin/weeek-mcp"
+  },
+  "license": "MIT",
+  "keywords": ["weeek", "tasks", "knowledge-base", "mcp"],
+  "server": {
+    "type": "uv",
+    "entry_point": "server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "server.py"],
+      "env": {
+        "WEEEK_API_TOKEN": "${user_config.api_token}",
+        "WEEEK_EMAIL": "${user_config.email}",
+        "WEEEK_PASSWORD": "${user_config.password}"
+      }
+    }
+  },
+  "user_config": {
+    "api_token": {
+      "type": "string",
+      "title": "API token",
+      "description": "Weeek → Settings → API.",
+      "sensitive": true,
+      "required": true
+    },
+    "email": {
+      "type": "string",
+      "title": "Email (knowledge base)",
+      "description": "Optional. Lets the server sign in to the knowledge base again when the session expires. Doesn't work with 2FA or SSO.",
+      "required": false,
+      "default": ""
+    },
+    "password": {
+      "type": "string",
+      "title": "Password (knowledge base)",
+      "description": "Optional, goes with the email above.",
+      "sensitive": true,
+      "required": false,
+      "default": ""
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "python": ">=3.10"
+    }
+  }
+}

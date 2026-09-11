@@ -57,7 +57,7 @@
 
 ## Требования
 
-- Python 3.10+
+- Python 3.10+ (для [бандла Claude Desktop](#claude-desktop) не нужен)
 - **API-токен Weeek** для работы с задачами (Weeek → Настройки → API).
 - Для базы знаний: `weeek-mcp[kb]` плюс Chromium (нужен только для входа) и либо логин/пароль, либо сессия, засеянная один раз через `weeek-mcp-login`.
 
@@ -109,7 +109,18 @@ weeek-mcp
 
 ### Claude Desktop
 
-Добавьте в `claude_desktop_config.json`:
+Проще всего поставить бандл. Скачайте [`weeek-mcp.mcpb`](https://github.com/adalekin/weeek-mcp/releases/latest/download/weeek-mcp.mcpb) из последнего релиза и откройте его двойным кликом или перетащите в Claude Desktop на страницу Settings → Extensions. Desktop спросит API-токен и установит расширение. Python и uv для этого не нужны: Desktop запускает сервер своим встроенным uv, а тот при первом запуске ставит `weeek-mcp` с PyPI.
+
+Для базы знаний всё равно нужен разовый вход из терминала, и здесь [uv](https://docs.astral.sh/uv/) уже понадобится:
+
+```bash
+uvx --from "weeek-mcp[kb]" playwright install chromium
+uvx --from "weeek-mcp[kb]" weeek-mcp-login
+```
+
+После входа перезапустите расширение (выключите и включите его в Settings → Extensions). Если в настройках расширения указать ещё email и пароль от Weeek, сервер сам войдёт заново, когда сессия истечёт. С 2FA и SSO так не выйдет, тогда просто повторите `weeek-mcp-login`.
+
+Вручную, без бандла, добавьте в `claude_desktop_config.json`:
 
 ```json
 {
