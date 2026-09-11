@@ -1,6 +1,6 @@
 [project]
 name = "weeek-mcp"
-version = "0.2.1"
+version = "0.2.2"
 description = "MCP server for Weeek: task management via the public API, knowledge base via its internal API and collaborative editor channel."
 readme = "README.md"
 license = { file = "LICENSE" }

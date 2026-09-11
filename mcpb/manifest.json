@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "weeek-mcp",
   "display_name": "Weeek",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Weeek task management and knowledge base",
   "long_description": "MCP server for Weeek.\n\n- **Tasks**: projects, boards, columns and the full task lifecycle, plus comments, time tracking, watchers, attachments and workspace admin.\n- **Knowledge base**: full CRUD. Documents are exposed as MCP resources, so they can be searched and pulled into context as content rather than links. Bodies convert between Markdown and Weeek's format automatically.\n\nThe knowledge base needs a one-time sign-in from a terminal with `weeek-mcp-login`; see the documentation link.",
   "author": {
