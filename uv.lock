@@ -1921,7 +1921,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "mcp", specifier = ">=1.2.0" },
+    { name = "mcp", specifier = ">=1.2.0,<2" },
     { name = "playwright", marker = "extra == 'kb'", specifier = ">=1.44.0" },
     { name = "pycrdt", marker = "extra == 'kb'", specifier = ">=0.10.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
