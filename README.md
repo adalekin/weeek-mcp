@@ -11,10 +11,9 @@ An [MCP](https://modelcontextprotocol.io) server for [Weeek](https://weeek.net):
 ## Contents
 
 - [Features](#features)
-- [Requirements](#requirements)
 - [Installation](#installation)
-- [Configuration](#configuration)
-- [Usage](#usage)
+  - [Claude Desktop](#claude-desktop)
+  - [Other MCP clients](#other-mcp-clients)
 - [Tools](#tools)
 - [Knowledge base in Claude context](#knowledge-base-in-claude-context)
 - [Status & limitations](#status--limitations)
@@ -35,98 +34,45 @@ Full CRUD. Weeek has no public KB API, so the server calls Weeek's **internal JS
 
 Task tools appear when an API token is set; KB tools and resources appear when login credentials or a cached session are present.
 
-## Requirements
-
-- Python 3.10+ (not needed for the [Claude Desktop bundle](#claude-desktop))
-- A Weeek **API token** for task tools (Weeek → Settings → API).
-- For the knowledge base: `weeek-mcp[kb]` plus the Chromium runtime (used for login only), and either login credentials or a session seeded once with `weeek-mcp-login`.
-
 ## Installation
-
-```bash
-pip install weeek-mcp              # task tools only
-pip install "weeek-mcp[kb]"        # + knowledge base
-playwright install chromium         # KB runtime
-```
-
-With [uv](https://docs.astral.sh/uv/) in your own project:
-
-```bash
-uv add "weeek-mcp[kb]"
-```
-
-## Configuration
-
-Set environment variables (or copy `.env.example` to `.env`). Use just the task API,
-just the knowledge base, or both.
-
-| Variable | Purpose |
-| --- | --- |
-| `WEEEK_API_TOKEN` | Task API token. Required for task tools. |
-| `WEEEK_EMAIL` / `WEEEK_PASSWORD` | First automated KB login. Optional (skip if 2FA/SSO — use `weeek-mcp-login`). |
-| `WEEEK_WORKSPACE_ID` | KB workspace id. Optional — auto-detected via `/ws` when unset. |
-| `WEEEK_STORAGE_STATE` | Where the browser session is cached (defaults under `~/.local/state`). |
-| `WEEEK_HEADLESS` | `false` to watch the browser during login. |
-| `WEEEK_KB_CACHE_TTL` | Seconds to cache the KB document list (default `300`). |
-| `WEEEK_DEBUG_LOG` | `1`/`true` to write diagnostic timing/step logs to `~/.local/state/weeek-mcp/debug.log` (some MCP hosts discard stderr). Off by default. |
-
-### Knowledge base first login
-
-If your account has 2FA or a captcha, automated login won't work. Seed the session
-once, interactively — it opens a browser, you sign in, then it caches the session for
-headless reuse:
-
-```bash
-weeek-mcp-login
-```
-
-## Usage
-
-Run the stdio server:
-
-```bash
-weeek-mcp
-```
 
 ### Claude Desktop
 
-The quickest route is the bundle. Download [`weeek-mcp.mcpb`](https://github.com/adalekin/weeek-mcp/releases/latest/download/weeek-mcp.mcpb) from the latest release and open it, or drag it onto Claude Desktop's Settings → Extensions page. Desktop asks for your API token and installs the extension. You don't need Python or uv for this: Desktop runs the server with its own uv, which fetches `weeek-mcp` from PyPI on first launch.
+1. Download [`weeek-mcp.mcpb`](https://github.com/adalekin/weeek-mcp/releases/latest/download/weeek-mcp.mcpb) from the latest release.
+2. Open it (or drag it onto Settings → Extensions) and enter your Weeek API token: Weeek → Settings → API.
 
-The knowledge base still needs a one-time sign-in from a terminal, and that part does use [uv](https://docs.astral.sh/uv/):
+That's all for tasks. Desktop runs the server with its own uv, so you don't need Python.
+
+For the knowledge base, sign in once from a terminal. This step needs [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uvx --from "weeek-mcp[kb]" playwright install chromium
 uvx --from "weeek-mcp[kb]" weeek-mcp-login
 ```
 
-Then restart the extension (switch it off and on in Settings → Extensions). If you also put your Weeek email and password in the extension settings, the server signs in again by itself when the session expires. That won't work with 2FA or SSO; run `weeek-mcp-login` again instead.
+A browser opens: sign in to Weeek and the session is saved. Then switch the extension off and on in Settings → Extensions.
 
-To set it up by hand, add to `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "weeek": {
-      "command": "weeek-mcp",
-      "env": {
-        "WEEEK_API_TOKEN": "...",
-        "WEEEK_STORAGE_STATE": "/absolute/path/to/storage_state.json"
-      }
-    }
-  }
-}
-```
+Email and password in the extension settings are optional. With them the server signs in again by itself when the session expires. Without them, or if you use 2FA or SSO, run `weeek-mcp-login` again.
 
 ### Other MCP clients
 
-`weeek-mcp` is a plain stdio server, so it works with any MCP client that launches
-servers as a local subprocess: Cursor, Windsurf, Cline, Continue, Zed, VS Code
-(Copilot agent mode), Gemini CLI, Goose, LibreChat, and others, plus your own agents
-built on an MCP SDK. The command and environment variables are the same as above —
-only the config format and its location differ.
+`weeek-mcp` is a plain stdio server, so it works with any MCP client that launches servers as a local subprocess: Claude Code, Cursor, Windsurf, Cline, Continue, Zed, VS Code (Copilot agent mode), Gemini CLI, Goose, LibreChat, and others, plus your own agents built on an MCP SDK. It needs Python 3.10+:
 
-Cursor (`~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project) uses the same shape
-as Claude Desktop:
+```bash
+pip install "weeek-mcp[kb]"        # drop [kb] if you only need tasks
+playwright install chromium         # knowledge base only
+weeek-mcp-login                     # knowledge base only, one-time sign-in
+```
+
+If `weeek-mcp-login` or `weeek-mcp` isn't found, pip put them outside your `PATH`: add the scripts directory from `pip show -f weeek-mcp` to it, or use the absolute path in your client config.
+
+Then register the `weeek-mcp` command with your client. Claude Code (`-s user` makes it available in every project):
+
+```bash
+claude mcp add weeek -s user -e WEEEK_API_TOKEN=... -- weeek-mcp
+```
+
+Cursor (`~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project):
 
 ```json
 {
@@ -158,6 +104,20 @@ VS Code (`.vscode/mcp.json`) uses a `servers` key and an explicit `type`:
 > **Resources**, which fewer clients surface. Where they aren't supported, read the KB
 > with `weeek_kb_read`/`weeek_kb_search` — the content still lands in context. MCP and
 > resources support moves fast per client; check the client's docs before relying on it.
+
+#### Configuration
+
+Environment variables (or a `.env` file, see `.env.example`). Only `WEEEK_API_TOKEN` is required, and only for task tools.
+
+| Variable | Purpose |
+| --- | --- |
+| `WEEEK_API_TOKEN` | Task API token. Required for task tools. |
+| `WEEEK_EMAIL` / `WEEEK_PASSWORD` | First automated KB login. Optional (skip if 2FA/SSO — use `weeek-mcp-login`). |
+| `WEEEK_WORKSPACE_ID` | KB workspace id. Optional — auto-detected via `/ws` when unset. |
+| `WEEEK_STORAGE_STATE` | Where the browser session is cached (defaults under `~/.local/state`). |
+| `WEEEK_HEADLESS` | `false` to watch the browser during login. |
+| `WEEEK_KB_CACHE_TTL` | Seconds to cache the KB document list (default `300`). |
+| `WEEEK_DEBUG_LOG` | `1`/`true` to write diagnostic timing/step logs to `~/.local/state/weeek-mcp/debug.log` (some MCP hosts discard stderr). Off by default. |
 
 ## Tools
 

@@ -12,10 +12,9 @@
 
 - [Зачем это](#зачем-это)
 - [Что умеет](#что-умеет)
-- [Требования](#требования)
 - [Установка](#установка)
-- [Настройка](#настройка)
-- [Запуск](#запуск)
+  - [Claude Desktop](#claude-desktop)
+  - [Другие MCP-клиенты](#другие-mcp-клиенты)
 - [Инструменты](#инструменты)
 - [База знаний в контексте Claude](#база-знаний-в-контексте-claude)
 - [Статус и ограничения](#статус-и-ограничения)
@@ -55,94 +54,45 @@
 
 Инструменты появляются под то, что настроено: задачи — когда задан API-токен, база знаний — когда есть логин или сохранённая сессия. Список инструментов не захламляется тем, чем вы не пользуетесь.
 
-## Требования
-
-- Python 3.10+ (для [бандла Claude Desktop](#claude-desktop) не нужен)
-- **API-токен Weeek** для работы с задачами (Weeek → Настройки → API).
-- Для базы знаний: `weeek-mcp[kb]` плюс Chromium (нужен только для входа) и либо логин/пароль, либо сессия, засеянная один раз через `weeek-mcp-login`.
-
 ## Установка
-
-```bash
-pip install weeek-mcp              # только задачи
-pip install "weeek-mcp[kb]"        # + база знаний
-playwright install chromium         # рантайм для KB
-```
-
-Через [uv](https://docs.astral.sh/uv/) в своём проекте:
-
-```bash
-uv add "weeek-mcp[kb]"
-```
-
-Пошаговое подключение к Claude Desktop и Claude Code — в **[docs/claude.md](docs/claude.md)**.
-
-## Настройка
-
-Переменные окружения (или скопируйте `.env.example` в `.env`). Можно включить только задачи, только базу знаний или всё сразу.
-
-| Переменная | Зачем |
-| --- | --- |
-| `WEEEK_API_TOKEN` | Токен API задач. Обязателен для инструментов задач. |
-| `WEEEK_EMAIL` / `WEEEK_PASSWORD` | Первый автоматический вход в KB. Необязательны (при 2FA/SSO используйте `weeek-mcp-login`). |
-| `WEEEK_WORKSPACE_ID` | ID воркспейса KB. Необязательно — определяется автоматически через `/ws`. |
-| `WEEEK_STORAGE_STATE` | Куда кешируется сессия браузера (по умолчанию — под `~/.local/state`). |
-| `WEEEK_HEADLESS` | `false`, чтобы видеть браузер во время входа. |
-| `WEEEK_KB_CACHE_TTL` | Сколько секунд кешировать список документов KB (по умолчанию `300`). |
-| `WEEEK_DEBUG_LOG` | `1`/`true` — писать диагностические логи с таймингами в `~/.local/state/weeek-mcp/debug.log` (некоторые клиенты глотают stderr). По умолчанию выключено. |
-
-### Первый вход в базу знаний
-
-Если у аккаунта есть 2FA или капча, автоматический вход не сработает. Засейте сессию один раз, вручную — команда откроет браузер, вы входите, после чего сессия кешируется для headless-переиспользования:
-
-```bash
-weeek-mcp-login
-```
-
-## Запуск
-
-Сервер работает по stdio:
-
-```bash
-weeek-mcp
-```
 
 ### Claude Desktop
 
-Проще всего поставить бандл. Скачайте [`weeek-mcp.mcpb`](https://github.com/adalekin/weeek-mcp/releases/latest/download/weeek-mcp.mcpb) из последнего релиза и откройте его двойным кликом или перетащите в Claude Desktop на страницу Settings → Extensions. Desktop спросит API-токен и установит расширение. Python и uv для этого не нужны: Desktop запускает сервер своим встроенным uv, а тот при первом запуске ставит `weeek-mcp` с PyPI.
+1. Скачайте [`weeek-mcp.mcpb`](https://github.com/adalekin/weeek-mcp/releases/latest/download/weeek-mcp.mcpb) из последнего релиза.
+2. Откройте файл (или перетащите его в Settings → Extensions) и введите API-токен Weeek: Weeek → Настройки → API.
 
-Для базы знаний всё равно нужен разовый вход из терминала, и здесь [uv](https://docs.astral.sh/uv/) уже понадобится:
+Для задач этого достаточно. Desktop запускает сервер своим встроенным uv, Python ставить не нужно.
+
+Для базы знаний один раз войдите из терминала. Здесь понадобится [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uvx --from "weeek-mcp[kb]" playwright install chromium
 uvx --from "weeek-mcp[kb]" weeek-mcp-login
 ```
 
-После входа перезапустите расширение (выключите и включите его в Settings → Extensions). Если в настройках расширения указать ещё email и пароль от Weeek, сервер сам войдёт заново, когда сессия истечёт. С 2FA и SSO так не выйдет, тогда просто повторите `weeek-mcp-login`.
+Откроется браузер: войдите в Weeek, и сессия сохранится. Потом выключите и включите расширение в Settings → Extensions.
 
-Вручную, без бандла, добавьте в `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "weeek": {
-      "command": "weeek-mcp",
-      "env": {
-        "WEEEK_API_TOKEN": "...",
-        "WEEEK_STORAGE_STATE": "/абсолютный/путь/до/storage_state.json"
-      }
-    }
-  }
-}
-```
-
-Настройка Claude Code (`claude mcp add`) и разбор частых проблем — в [docs/claude.md](docs/claude.md).
+Email и пароль в настройках расширения необязательны. С ними сервер сам войдёт заново, когда сессия истечёт. Без них, а при 2FA и SSO в любом случае, просто повторите `weeek-mcp-login`.
 
 ### Другие MCP-клиенты
 
-`weeek-mcp` — обычный stdio-сервер, поэтому подойдёт любому MCP-клиенту, который запускает серверы как локальный подпроцесс: Cursor, Windsurf, Cline, Continue, Zed, VS Code (Copilot в agent mode), Gemini CLI, Goose, LibreChat и другим, а также вашим собственным агентам на MCP SDK. Команда и переменные те же, что выше, — меняются только формат и расположение конфига.
+`weeek-mcp` это обычный stdio-сервер, поэтому он подойдёт любому MCP-клиенту, который запускает серверы как локальный подпроцесс: Claude Code, Cursor, Windsurf, Cline, Continue, Zed, VS Code (Copilot в agent mode), Gemini CLI, Goose, LibreChat и другим, а также вашим собственным агентам на MCP SDK. Нужен Python 3.10+:
 
-Cursor (`~/.cursor/mcp.json` или `.cursor/mcp.json` в проекте) использует ту же форму, что и Claude Desktop:
+```bash
+pip install "weeek-mcp[kb]"        # без [kb], если нужны только задачи
+playwright install chromium         # только для базы знаний
+weeek-mcp-login                     # только для базы знаний, разовый вход
+```
+
+Если `weeek-mcp-login` или `weeek-mcp` не находятся, pip положил их вне `PATH`: добавьте туда каталог скриптов из вывода `pip show -f weeek-mcp` или укажите в конфиге клиента абсолютный путь.
+
+Потом пропишите команду `weeek-mcp` в клиенте. Claude Code (`-s user` подключает сервер во всех проектах):
+
+```bash
+claude mcp add weeek -s user -e WEEEK_API_TOKEN=... -- weeek-mcp
+```
+
+Cursor (`~/.cursor/mcp.json` или `.cursor/mcp.json` в проекте):
 
 ```json
 {
@@ -169,7 +119,23 @@ VS Code (`.vscode/mcp.json`) — ключ `servers` и явный `type`:
 }
 ```
 
+Пошаговая настройка Claude Code и ручной конфиг Claude Desktop описаны в [docs/claude.md](docs/claude.md).
+
 > **Про базу знаний.** Задачные инструменты и `weeek_kb_*` — обычные MCP-tools и работают почти везде. А подтягивание документов через меню вложений опирается на MCP-**Resources**, которые выводят наружу не все клиенты. Где их нет, читайте KB через `weeek_kb_read`/`weeek_kb_search` — содержимое всё равно попадёт в контекст. Наличие поддержки MCP и resources у конкретного клиента меняется быстро; перед настройкой свериться стоит с его документацией.
+
+#### Настройка
+
+Переменные окружения (или файл `.env`, образец в `.env.example`). Обязателен только `WEEEK_API_TOKEN`, и только для задач.
+
+| Переменная | Зачем |
+| --- | --- |
+| `WEEEK_API_TOKEN` | Токен API задач. Обязателен для инструментов задач. |
+| `WEEEK_EMAIL` / `WEEEK_PASSWORD` | Первый автоматический вход в KB. Необязательны (при 2FA/SSO используйте `weeek-mcp-login`). |
+| `WEEEK_WORKSPACE_ID` | ID воркспейса KB. Необязательно — определяется автоматически через `/ws`. |
+| `WEEEK_STORAGE_STATE` | Куда кешируется сессия браузера (по умолчанию — под `~/.local/state`). |
+| `WEEEK_HEADLESS` | `false`, чтобы видеть браузер во время входа. |
+| `WEEEK_KB_CACHE_TTL` | Сколько секунд кешировать список документов KB (по умолчанию `300`). |
+| `WEEEK_DEBUG_LOG` | `1`/`true` — писать диагностические логи с таймингами в `~/.local/state/weeek-mcp/debug.log` (некоторые клиенты глотают stderr). По умолчанию выключено. |
 
 ## Инструменты
 
