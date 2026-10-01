@@ -1021,6 +1021,26 @@ KB_TOOLS: list[types.Tool] = [
         inputSchema={"type": "object", "properties": {}},
     ),
     types.Tool(
+        name="weeek_kb_attach",
+        description=(
+            "Attach local files to a knowledge base document. Each file is uploaded "
+            "and added as a block at the end of the body — an image block for "
+            "images, a file block with name and size for everything else; the rest "
+            "of the body is left as it is. Weeek has no attachment list beside a "
+            "document, so the block is the attachment: in weeek_kb_read it shows as "
+            "a link on its own line, and weeek_kb_update keeps it as long as that "
+            "line stays in the new body. Paths must exist on this machine."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "doc_id": {"type": "string"},
+                "paths": {"type": "array", "items": {"type": "string"}, "description": "Absolute file paths."},
+            },
+            "required": ["doc_id", "paths"],
+        },
+    ),
+    types.Tool(
         name="weeek_kb_move",
         description="Nest an existing knowledge base document under another one (or move it elsewhere in the tree).",
         inputSchema={
@@ -1602,6 +1622,8 @@ async def handle_kb_tool(name: str, args: dict[str, Any], kb: WeeekKB) -> Any:
             width=args.get("width", "text"),
         )
         return {"id": args["doc_id"], **result}
+    if name == "weeek_kb_attach":
+        return {"id": args["doc_id"], "attached": await kb.attach_files(args["doc_id"], args["paths"])}
     if name == "weeek_kb_move":
         await kb.move_document(args["doc_id"], args["parent_id"])
         return {"id": args["doc_id"], "parent_id": args["parent_id"], "moved": True}

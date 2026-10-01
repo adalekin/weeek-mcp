@@ -142,7 +142,7 @@ These take an `action` (create/update/delete/…) rather than one tool per opera
 | Group | Tools |
 | --- | --- |
 | Reading | `weeek_kb_search`, `weeek_kb_list`, `weeek_kb_read` |
-| Writing | `weeek_kb_create`, `weeek_kb_update`, `weeek_kb_delete` |
+| Writing | `weeek_kb_create`, `weeek_kb_update`, `weeek_kb_attach`, `weeek_kb_delete` |
 | Formatting | `weeek_kb_table_widths`, `weeek_kb_icons` |
 
 > `weeek_kb_update` with new content writes into the document's shared Yjs document over
@@ -167,6 +167,8 @@ These take an `action` (create/update/delete/…) rather than one tool per opera
 **Comments.** Read with `weeek_list_task_comments`, written with `weeek_add_task_comment` and rewritten in place with `weeek_update_task_comment` (all Markdown) — an edited comment beats posting a correction under the original. `weeek_delete_task_comment` removes one for good; Weeek keeps no trash for comments. Weeek's public API has no comments at all, so these go through its web API on the knowledge base session; no browser is launched, only the saved cookies.
 
 **Tables.** One size to set: the pixel width of each column (minimum 90). New tables are fitted to the document's content column (~676px) instead of Weeek's 180px-per-column default, and existing widths are carried across a `weeek_kb_update` — a table that gains or loses a column is re-fitted. `weeek_kb_table_widths` sets them explicitly: `widths: [300, 200, 176]` for exact sizes, or `fit: true` to spread a table across the content column.
+
+**Attachments.** `weeek_kb_attach` uploads local files and adds each one as a block at the end of the document: an image block for images, a file block with name and size for anything else. It leaves the rest of the body alone. Weeek keeps no attachment list beside a document, so the block is the attachment. `weeek_kb_read` shows it as a link on a line of its own, and `weeek_kb_update` keeps the block as long as that line stays in the new body; drop the line and the block goes with it.
 
 **Icons.** Pass `icon` to `weeek_kb_create`/`weeek_kb_update` as a single emoji (`🚀`) or as one of Weeek's built-in icon names (`weeek_kb_icons` lists them); an empty `icon` removes it. Listings report the icon a document currently has.
 

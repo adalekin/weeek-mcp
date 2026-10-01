@@ -1,7 +1,7 @@
 """Convert between Weeek knowledge base documents (ProseMirror/TipTap JSON) and Markdown.
 
 Node types observed in Weeek KB: doc, heading, paragraph, list (nested), text, code,
-quote, horizontal-line, image, line-break, table/table_body/table_row/table_cell/table_html.
+quote, horizontal-line, image, file, line-break, table/table_body/table_row/table_cell/table_html.
 Mark types: bold, italic, strike, code, link.
 
 Both directions (read: doc -> markdown, write: markdown -> doc / -> HTML) support
@@ -119,6 +119,11 @@ def _block(node: dict) -> str:
         return "---"
     if t == "image":
         return f"![]({attrs.get('link', '')})"
+    if t == "file":
+        # An attached file (or a bare link block) reads as a link on a line of its
+        # own; restore_files turns that line back into the block on the way in.
+        link = attrs.get("link") or ""
+        return f"[{attrs.get('name') or link}]({link})" if link else ""
     if t == "list":
         return _list_item(node, 0)
     if t in ("table", "table_body", "table_row", "table_cell"):
@@ -405,6 +410,55 @@ def markdown_to_doc(md: str) -> dict:
 
     flush_para()
     return {"type": "doc", "content": content}
+
+
+_FILE_ATTRS = ("id", "type", "link", "name", "size")
+
+
+def restore_files(doc: dict, before: Any) -> dict:
+    """Put the file blocks of the old body ``before`` back into the new ``doc``.
+
+    Markdown has no file block: one reads out as a link on a line of its own, and
+    comes back in as a paragraph holding that link. Left like that, replacing a
+    body would quietly turn every attachment into plain text. So a top-level
+    paragraph that is nothing but a link to a file the old body held becomes that
+    file block again, with the name and size Markdown could not carry. An image
+    does survive as a block, but without the id of its upload, so that goes back
+    on by the same link.
+    """
+    known: dict[str, dict] = {}
+    image_ids: dict[str, Any] = {}
+
+    def collect(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        attrs = node.get("attrs") or {}
+        if isinstance(attrs, dict) and attrs.get("link"):
+            if node.get("type") == "file":
+                known[attrs["link"]] = attrs
+            elif node.get("type") == "image" and attrs.get("id"):
+                image_ids[attrs["link"]] = attrs["id"]
+        for child in node.get("content") or []:
+            collect(child)
+
+    collect(before)
+    blocks = doc.get("content") or []
+    for i, block in enumerate(blocks):
+        if block.get("type") == "image":
+            link = (block.get("attrs") or {}).get("link") or ""
+            if link in image_ids:
+                block["attrs"] = {"id": image_ids[link], "link": link}
+            continue
+        inline = block.get("content") or []
+        if block.get("type") != "paragraph" or len(inline) != 1:
+            continue
+        marks = inline[0].get("marks") or []
+        if len(marks) != 1 or marks[0].get("type") != "link":
+            continue
+        old = known.get((marks[0].get("attrs") or {}).get("href") or "")
+        if old is not None:
+            blocks[i] = {"type": "file", "attrs": {k: old[k] for k in _FILE_ATTRS if old.get(k) is not None}}
+    return doc
 
 
 # ======================================================================= doc -> HTML

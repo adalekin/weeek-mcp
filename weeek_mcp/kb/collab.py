@@ -188,6 +188,19 @@ def write_body(fragment: XmlFragment, doc: dict) -> None:
         _inline(text, nodes)
 
 
+def append_body(fragment: XmlFragment, nodes: list[dict]) -> None:
+    """Add ProseMirror ``nodes`` after everything ``fragment`` already holds."""
+    if XmlElement is None:
+        raise CollabError(_MISSING_CRDT)
+    pending: list[tuple[XmlText, list[dict]]] = []
+    for node in nodes:
+        element = _element(node, pending)
+        if element is not None:
+            fragment.children.append(element)
+    for text, inline in pending:
+        _inline(text, inline)
+
+
 def table_bodies(fragment: XmlFragment) -> list[XmlElement]:
     """Every ``table_body`` in the fragment, in document order."""
     found: list[XmlElement] = []

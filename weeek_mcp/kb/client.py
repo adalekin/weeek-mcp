@@ -10,6 +10,7 @@ Endpoints (base ``{internal_api_base}/ws/{workspace_id}``):
   GET /kb/articles/{id}                                        -> article + content
   POST /kb/articles/{id}/avatar {objectType, objectId}         -> set the document icon
   DELETE /kb/articles/{id}/avatar                              -> clear the icon
+  POST /kb/articles/{id}/attachments (multipart "file")        -> upload a file for the body
   GET /tm/tasks/{id}/comments                                  -> task comments
   POST /tm/tasks/{id}/comments {content}                       -> add one
   PUT /tm/tasks/{id}/comments/{commentId} {content}            -> rewrite one
@@ -39,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
 import re
 import time
 import uuid
@@ -51,7 +53,7 @@ import httpx
 from ..config import Config
 from ..logging_util import make_logger
 from . import collab
-from .prosemirror import markdown_to_doc, to_markdown
+from .prosemirror import markdown_to_doc, restore_files, to_markdown
 from .session import KBAuthError, automated_login, load_cookies_into
 from .tables import (
     MeasuredTable,
@@ -316,6 +318,18 @@ class WeeekKB:
             raise KBError(f"Internal API {resp.status_code} for {path}: {resp.text[:200]}")
         return resp.json()
 
+    async def _upload(self, path: str, file: Path, *, _retry: bool = True):
+        client = self._ensure_client()
+        mime = mimetypes.guess_type(file.name)[0] or "application/octet-stream"
+        with file.open("rb") as fh:
+            resp = await client.post(path, files={"file": (file.name, fh, mime)})
+        if resp.status_code in (401, 403) and _retry:
+            await self._refresh_session()
+            return await self._upload(path, file, _retry=False)
+        if resp.status_code >= 400:
+            raise KBError(f"Internal API {resp.status_code} for {path}: {resp.text[:200]}")
+        return resp.json()
+
     async def _put(self, path: str, payload: dict, *, _retry: bool = True):
         client = self._ensure_client()
         resp = await client.put(path, json=payload)
@@ -547,8 +561,9 @@ class WeeekKB:
         ones, are fitted to ``width`` instead — "text" for the column of text,
         "page" to overhang it and span the document area.
         """
-        before = read_tables(await self._document_content(doc_id))
-        doc = markdown_to_doc(markdown)
+        old = await self._document_content(doc_id)
+        before = read_tables(old)
+        doc = restore_files(markdown_to_doc(markdown), old)
         after = read_tables(doc)
         plan = carry_over_plan(before, after) if after else None
         if table_widths is not None and plan is not None:
@@ -596,6 +611,58 @@ class WeeekKB:
                     f"The body was written, but table(s) {missed} kept their old widths. "
                     "The body is safe — only the sizing did not take."
                 )
+
+    async def attach_files(self, doc_id: str, paths: list[str]) -> list[dict]:
+        """Upload local files and add them to the end of a document's body.
+
+        Weeek keeps no attachment list beside a document: a file is a block in the
+        body, pointing at an upload. So this is two writes — the upload over REST,
+        then the block over the collaborative channel, appended rather than routed
+        through Markdown so the rest of the body is not rebuilt. Images become
+        image blocks, everything else a file block with its name and size.
+        """
+        files = [Path(p).expanduser() for p in paths]
+        if not files:
+            raise KBError("No files to attach.")
+        relative = [str(f) for f in files if not f.is_absolute()]
+        if relative:
+            raise KBError(
+                f"paths must be absolute, got {', '.join(relative)}. A relative path resolves against "
+                "the server's working directory, not the caller's. Nothing was uploaded."
+            )
+        missing = [str(f) for f in files if not f.is_file()]
+        if missing:
+            raise KBError(f"No such file(s) on this machine: {', '.join(missing)}. Nothing was uploaded.")
+
+        ws = await self._workspace()
+        attached: list[dict] = []
+        nodes: list[dict] = []
+        for file in files:
+            data = await self._upload(f"/ws/{ws}/kb/articles/{doc_id}/attachments", file)
+            link = data.get("previewLink")
+            if not data.get("id") or not link:
+                raise KBError(f"Weeek took {file.name} but did not say where it put it: {str(data)[:200]}")
+            if (mimetypes.guess_type(file.name)[0] or "").startswith("image/"):
+                nodes.append({"type": "image", "attrs": {"id": data["id"], "link": link}})
+            else:
+                attrs = {"id": data["id"], "type": "file", "link": link, "name": data.get("name") or file.name}
+                if data.get("size") is not None:
+                    attrs["size"] = data["size"]
+                nodes.append({"type": "file", "attrs": attrs})
+            attached.append(
+                {"id": data["id"], "name": data.get("name") or file.name, "size": data.get("size"), "link": link}
+            )
+
+        async def settled() -> bool:
+            served = json.dumps(await self._document_content(doc_id), ensure_ascii=False)
+            return all(item["link"] in served for item in attached)
+
+        url, name, token = await self._collab("article", str(doc_id))
+        try:
+            await collab.apply(url, name, token, lambda fragment: collab.append_body(fragment, nodes), settled=settled)
+        except collab.CollabError as exc:
+            raise KBError(str(exc)) from exc
+        return attached
 
     async def set_table_widths(
         self,
