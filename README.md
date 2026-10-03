@@ -143,6 +143,7 @@ These take an `action` (create/update/delete/…) rather than one tool per opera
 | --- | --- |
 | Reading | `weeek_kb_search`, `weeek_kb_list`, `weeek_kb_read` |
 | Writing | `weeek_kb_create`, `weeek_kb_update`, `weeek_kb_attach`, `weeek_kb_delete` |
+| Structure | `weeek_kb_move`, `weeek_kb_reorder` |
 | Formatting | `weeek_kb_table_widths`, `weeek_kb_icons` |
 
 > `weeek_kb_update` with new content writes into the document's shared Yjs document over
@@ -171,6 +172,12 @@ These take an `action` (create/update/delete/…) rather than one tool per opera
 **Attachments.** `weeek_kb_attach` uploads local files and adds each one as a block at the end of the document: an image block for images, a file block with name and size for anything else. It leaves the rest of the body alone. Weeek keeps no attachment list beside a document, so the block is the attachment. `weeek_kb_read` shows it as a link on a line of its own, and `weeek_kb_update` keeps the block as long as that line stays in the new body; drop the line and the block goes with it.
 
 **Icons.** Pass `icon` to `weeek_kb_create`/`weeek_kb_update` as a single emoji (`🚀`) or as one of Weeek's built-in icon names (`weeek_kb_icons` lists them); an empty `icon` removes it. Listings report the icon a document currently has.
+
+**Order and folders.** A folder in Weeek is a document that has children, so `weeek_kb_move` moves and reorders both. Pass exactly one of `parent_id`, `before` or `after`. With `parent_id` the document becomes the first child of that document. With `before` or `after` it lands right next to that document, under the same parent, which may be the top level. To make a document the last one in a folder, pass `after` with the folder's current last child. A document created with `parent_id` goes to the end of that folder. A document in the trash cannot be a destination.
+
+`weeek_kb_reorder` sets the order of a folder in one call. `order` lists ids that share a parent; those documents go to the start of the folder in that order, and the siblings you left out follow in their current order. `weeek_kb_list` returns documents depth-first in sidebar order, each with its `parent_id`. Pass `parent_id` to get only the direct children of one document, or `""` for the top level.
+
+When a folder is moved, Weeek reverses the order of everything inside it, and drag-and-drop in the web app does the same. `weeek_kb_move` and `weeek_kb_reorder` check for this and restore the original order.
 
 ## Knowledge base in Claude context
 

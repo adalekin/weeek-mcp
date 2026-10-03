@@ -837,14 +837,22 @@ KB_TOOLS: list[types.Tool] = [
     ),
     types.Tool(
         name="weeek_kb_list",
-        description="List all knowledge base documents (id, title, resource URI).",
+        description=(
+            "List all knowledge base documents (id, title, parent_id, resource URI), "
+            "depth-first in the order the KB sidebar shows them. parent_id narrows it to "
+            "the direct children of one document."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
+                "parent_id": {
+                    "type": "string",
+                    "description": 'Only the direct children of this document; "" for the top level.',
+                },
                 "force_refresh": {
                     "type": "boolean",
                     "description": "Bypass the cache and re-read the document tree.",
-                }
+                },
             },
         },
     ),
@@ -864,7 +872,8 @@ KB_TOOLS: list[types.Tool] = [
             "creation, supporting: headings, nested bullet/numbered/checkbox lists, "
             "blockquotes, fenced code, horizontal rules, pipe tables, images "
             "(![alt](url)), and inline **bold**, *italic*, ~~strike~~, `code`, "
-            "[links](url). parent_id nests it under another document (folder). "
+            "[links](url). parent_id nests it under another document (folder), as its "
+            "last child. "
             "Tables are created spanning the document's content column, with the "
             "width split evenly between the columns; weeek_kb_table_widths changes that."
         ),
@@ -1042,14 +1051,45 @@ KB_TOOLS: list[types.Tool] = [
     ),
     types.Tool(
         name="weeek_kb_move",
-        description="Nest an existing knowledge base document under another one (or move it elsewhere in the tree).",
+        description=(
+            "Move a knowledge base document, with everything under it, or change its "
+            "position among its siblings. Folders are ordinary documents that have "
+            "children, so this moves and reorders folders too. Pass exactly one of "
+            "parent_id, before, after. parent_id puts the document first inside that "
+            "one; before/after put it right next to that document, under its parent "
+            "(the top level included). To put it last in a folder, use after=<last "
+            "child>. weeek_kb_list shows the current order and each document's parent_id."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
                 "doc_id": {"type": "string"},
-                "parent_id": {"type": "string", "description": "New parent document id."},
+                "parent_id": {"type": "string", "description": "Move inside this document, as its first child."},
+                "before": {"type": "string", "description": "Place right before this document."},
+                "after": {"type": "string", "description": "Place right after this document."},
             },
-            "required": ["doc_id", "parent_id"],
+            "required": ["doc_id"],
+        },
+    ),
+    types.Tool(
+        name="weeek_kb_reorder",
+        description=(
+            "Set the order of documents inside one folder in a single call. order lists "
+            "document ids that share a parent (or are all at the top level); they are "
+            "lined up in that order at the start of the folder, and siblings left out "
+            "follow them in their current order. Use weeek_kb_move for a single document "
+            "or to move one to another folder."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "order": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Document ids, first to last.",
+                },
+            },
+            "required": ["order"],
         },
     ),
     types.Tool(
@@ -1571,7 +1611,14 @@ async def _handle_custom_fields(args: dict[str, Any], api: WeeekAPI) -> Any:
 
 def _doc_payload(doc: KBDocument) -> dict[str, Any]:
     # icon is always present so its absence reads as "no icon", not as a field we forgot.
-    return {"id": doc.id, "title": doc.title, "path": doc.path, "uri": kb_uri(doc.id), "icon": doc.icon}
+    return {
+        "id": doc.id,
+        "title": doc.title,
+        "path": doc.path,
+        "uri": kb_uri(doc.id),
+        "icon": doc.icon,
+        "parent_id": doc.parent_id,
+    }
 
 
 async def handle_kb_tool(name: str, args: dict[str, Any], kb: WeeekKB) -> Any:
@@ -1579,6 +1626,9 @@ async def handle_kb_tool(name: str, args: dict[str, Any], kb: WeeekKB) -> Any:
         return [_doc_payload(d) for d in await kb.search(args["query"])]
     if name == "weeek_kb_list":
         docs = await kb.list_documents(force=bool(args.get("force_refresh")))
+        if "parent_id" in args:
+            parent = args["parent_id"] or None  # "" is the top level
+            docs = [d for d in docs if d.parent_id == parent]
         return [_doc_payload(d) for d in docs]
     if name == "weeek_kb_read":
         return await kb.read_document(args["doc_id"])
@@ -1625,8 +1675,12 @@ async def handle_kb_tool(name: str, args: dict[str, Any], kb: WeeekKB) -> Any:
     if name == "weeek_kb_attach":
         return {"id": args["doc_id"], "attached": await kb.attach_files(args["doc_id"], args["paths"])}
     if name == "weeek_kb_move":
-        await kb.move_document(args["doc_id"], args["parent_id"])
-        return {"id": args["doc_id"], "parent_id": args["parent_id"], "moved": True}
+        result = await kb.move_document(
+            args["doc_id"], parent_id=args.get("parent_id"), before=args.get("before"), after=args.get("after")
+        )
+        return {"id": args["doc_id"], **result, "moved": True}
+    if name == "weeek_kb_reorder":
+        return await kb.reorder_documents(args["order"])
     if name == "weeek_kb_export":
         result = await kb.export_documents(args["target_dir"], query=args.get("query", ""))
         # Keep the response compact: counts and directory, not every path.

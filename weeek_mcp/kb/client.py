@@ -25,7 +25,15 @@ Reference data for icons lives outside the workspace tree, at
 
 Note: ``parentId`` in the create/update article body is silently ignored by the
 API (confirmed by network capture of the web app) — nesting is a separate write,
-``PATCH /kb/hierarchy`` with ``{targetId, placeId, direction: "into"}``. The
+``PATCH /kb/hierarchy`` with ``{targetId, placeId, direction}``: ``into`` makes
+the target the first child of ``placeId``, ``up``/``down`` put it right before/after
+``placeId`` under that one's parent (top level included). Siblings are ordered by
+the article's ``sort``, ascending. Moving a document that has children reverses
+the order of its children at every level of the subtree (the web app's
+drag-and-drop does the same); repeating the identical move reverses them back.
+``GET /kb/hierarchy`` is no source for the tree: it carries top-level documents
+and the trash, not live children, so order is read from search, which has
+``parentId`` and ``sort`` too. The
 document icon behaves the same way: avatar fields in the article body are
 swallowed, and only the ``/avatar`` subresource actually writes it.
 
@@ -67,6 +75,7 @@ from .tables import (
 )
 
 _PAGE_LIMIT = 200
+_ORDER_LOST = "Moved, but Weeek changed the order of the documents inside it."
 
 
 class KBError(RuntimeError):
@@ -80,6 +89,7 @@ class KBDocument:
     path: str  # breadcrumb trail, e.g. "Технологии / Провайдеры"
     icon: str | None = None  # emoji character or built-in icon name, when set
     crumbs: tuple[str, ...] = ()  # breadcrumb names, self last; folders are crumbs[:-1]
+    parent_id: str | None = None  # None at the top level
 
 
 _VARIATION_SELECTOR = "\ufe0f"
@@ -168,6 +178,59 @@ def _breadcrumb(article: dict) -> str:
     return " / ".join(_breadcrumb_parts(article))
 
 
+def _error_text(resp: httpx.Response) -> str:
+    """Weeek's own message when the body carries one, the raw body otherwise."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return resp.text[:200]
+    if isinstance(body, dict) and body.get("message"):
+        return f"{body['message']} (code {body['code']})" if body.get("code") else str(body["message"])
+    return resp.text[:200]
+
+
+def _sort_key(article: dict) -> int:
+    return int(article.get("sort") or 0)
+
+
+def _tree_order(articles: list[dict]) -> list[dict]:
+    """Articles depth-first, siblings in the order the KB sidebar shows them.
+
+    An article whose parent is not among them is kept as a root, not dropped.
+    """
+    ids = {a["id"] for a in articles}
+    children: dict[object, list[dict]] = {}
+    for a in articles:
+        parent = a.get("parentId")
+        children.setdefault(parent if parent in ids else None, []).append(a)
+    ordered: list[dict] = []
+
+    def walk(parent: object) -> None:
+        for a in sorted(children.get(parent, []), key=_sort_key):
+            ordered.append(a)
+            walk(a["id"])
+
+    walk(None)
+    return ordered
+
+
+def _subtree_order(articles: list[dict], root_id: str) -> dict[str, list[str]]:
+    """Child order of every folder under ``root_id`` (itself included) with two or more children."""
+    children: dict[str, list[dict]] = {}
+    for a in articles:
+        if a.get("parentId") is not None:
+            children.setdefault(str(a["parentId"]), []).append(a)
+    order: dict[str, list[str]] = {}
+    stack = [str(root_id)]
+    while stack:
+        folder = stack.pop()
+        kids = sorted(children.get(folder, []), key=_sort_key)
+        if len(kids) > 1:
+            order[folder] = [str(a["id"]) for a in kids]
+        stack.extend(str(a["id"]) for a in kids)
+    return order
+
+
 class WeeekKB:
     def __init__(self, config: Config):
         self._cfg = config
@@ -226,10 +289,10 @@ class WeeekKB:
             await self._refresh_session()
             return await self._get(path, params=params, _retry=False)
         if resp.status_code >= 400:
-            raise KBError(f"Internal API {resp.status_code} for {path}: {resp.text[:200]}")
+            raise KBError(f"Internal API {resp.status_code} for {path}: {_error_text(resp)}")
         data = resp.json()
         if isinstance(data, dict) and data.get("success") is False:
-            raise KBError(f"Internal API returned success=false for {path}")
+            raise KBError(f"Internal API returned success=false for {path}: {data.get('message') or 'no message'}")
         return data
 
     async def _workspace(self) -> str:
@@ -256,13 +319,20 @@ class WeeekKB:
             self._client = None
 
     # ------------------------------------------------------------- documents
-    async def _search_articles(self, query: str) -> list[KBDocument]:
+    async def _search_raw(self, query: str) -> list[dict]:
         ws = await self._workspace()
-        data = await self._get(
-            f"/ws/{ws}/kb/articles/search",
-            params={"search": query, "offset": 0, "limit": _PAGE_LIMIT, "isTrashed": 0},
-        )
-        articles = data.get("articles") or []
+        articles: list[dict] = []
+        while True:
+            data = await self._get(
+                f"/ws/{ws}/kb/articles/search",
+                params={"search": query, "offset": len(articles), "limit": _PAGE_LIMIT, "isTrashed": 0},
+            )
+            page = data.get("articles") or []
+            articles += page
+            if len(page) < _PAGE_LIMIT:
+                return articles
+
+    async def _to_documents(self, articles: list[dict]) -> list[KBDocument]:
         await self._load_catalog_quietly()  # to name the icons the articles carry
         return [
             KBDocument(
@@ -271,16 +341,20 @@ class WeeekKB:
                 path=_breadcrumb(a),
                 icon=self._icon_label(a.get("avatar")),
                 crumbs=tuple(_breadcrumb_parts(a)),
+                parent_id=None if a.get("parentId") is None else str(a["parentId"]),
             )
             for a in articles
         ]
+
+    async def _search_articles(self, query: str) -> list[KBDocument]:
+        return await self._to_documents(await self._search_raw(query))
 
     async def list_documents(self, *, force: bool = False) -> list[KBDocument]:
         now = time.monotonic()
         if not force and self._cache is not None and now - self._cache_ts < self._cfg.kb_cache_ttl:
             return self._cache
         async with self._lock:
-            docs = await self._search_articles("")
+            docs = await self._to_documents(_tree_order(await self._search_raw("")))
             self._cache = docs
             self._cache_ts = now
             return docs
@@ -315,7 +389,7 @@ class WeeekKB:
             await self._refresh_session()
             return await self._post(path, payload, _retry=False)
         if resp.status_code >= 400:
-            raise KBError(f"Internal API {resp.status_code} for {path}: {resp.text[:200]}")
+            raise KBError(f"Internal API {resp.status_code} for {path}: {_error_text(resp)}")
         return resp.json()
 
     async def _upload(self, path: str, file: Path, *, _retry: bool = True):
@@ -327,7 +401,7 @@ class WeeekKB:
             await self._refresh_session()
             return await self._upload(path, file, _retry=False)
         if resp.status_code >= 400:
-            raise KBError(f"Internal API {resp.status_code} for {path}: {resp.text[:200]}")
+            raise KBError(f"Internal API {resp.status_code} for {path}: {_error_text(resp)}")
         return resp.json()
 
     async def _put(self, path: str, payload: dict, *, _retry: bool = True):
@@ -337,7 +411,7 @@ class WeeekKB:
             await self._refresh_session()
             return await self._put(path, payload, _retry=False)
         if resp.status_code >= 400:
-            raise KBError(f"Internal API {resp.status_code} for {path}: {resp.text[:200]}")
+            raise KBError(f"Internal API {resp.status_code} for {path}: {_error_text(resp)}")
         return resp.json()
 
     async def _patch(self, path: str, payload: dict, *, _retry: bool = True):
@@ -347,7 +421,7 @@ class WeeekKB:
             await self._refresh_session()
             return await self._patch(path, payload, _retry=False)
         if resp.status_code >= 400:
-            raise KBError(f"Internal API {resp.status_code} for {path}: {resp.text[:200]}")
+            raise KBError(f"Internal API {resp.status_code} for {path}: {_error_text(resp)}")
         return resp.json()
 
     async def _delete(self, path: str, *, _retry: bool = True):
@@ -357,23 +431,52 @@ class WeeekKB:
             await self._refresh_session()
             return await self._delete(path, _retry=False)
         if resp.status_code >= 400:
-            raise KBError(f"Internal API {resp.status_code} for {path}: {resp.text[:200]}")
+            raise KBError(f"Internal API {resp.status_code} for {path}: {_error_text(resp)}")
         return resp.json()
 
     def _invalidate_cache(self) -> None:
         self._cache = None
 
-    async def _set_parent(self, doc_id: str, parent_id: str | int) -> None:
-        """Nest a document under another one.
+    async def _place(self, doc_id: str, place_id: str | int, direction: str = "into") -> dict:
+        """Put a document into another one (first child) or right before/after it.
 
         ``parentId`` in the article create/update body is silently ignored by the
-        API — this is the only endpoint that actually reparents a document.
+        API — this is the only endpoint that actually reparents or reorders a document.
         """
         ws = await self._workspace()
-        await self._patch(
+        data = await self._patch(
             f"/ws/{ws}/kb/hierarchy",
-            {"targetId": int(doc_id), "placeId": int(parent_id), "direction": "into"},
+            {"targetId": int(doc_id), "placeId": int(place_id), "direction": direction},
         )
+        return cast(dict, data)
+
+    async def _refuse_trashed(self, doc_id: str | int, articles: list[dict]) -> None:
+        """Refuse a document that sits in the trash; Weeek itself accepts it as a place to move to.
+
+        A document missing from search is not necessarily trashed (private documents
+        are not listed there either), so the trash list has the last word.
+        """
+        if any(str(a["id"]) == str(doc_id) for a in articles):
+            return
+        ws = await self._workspace()
+        data = (await self._get(f"/ws/{ws}/kb/hierarchy")).get("data") or {}
+        if str(doc_id) in {str(i) for i in data.get("trash") or []}:
+            raise KBError(f"Document {doc_id} is in the trash.")
+
+    async def _move(self, doc_id: str, place: str | int, direction: str, articles: list[dict]) -> tuple[dict, bool]:
+        """One placement that keeps the order of what is inside the document.
+
+        ``articles`` is the tree as it was before the move. Returns the response and
+        whether the inner order survived.
+        """
+        order = _subtree_order(articles, doc_id)
+        data = await self._place(doc_id, place, direction)
+        kept = True
+        if order and _subtree_order(await self._search_raw(""), doc_id) != order:
+            # Weeek reversed the children; the identical move reverses them back.
+            data = await self._place(doc_id, place, direction)
+            kept = _subtree_order(await self._search_raw(""), doc_id) == order
+        return data, kept
 
     # ------------------------------------------------------------- icons
     async def _load_catalog(self) -> None:
@@ -463,6 +566,10 @@ class WeeekKB:
         # Resolve the icon first: an unknown one must fail before a document exists,
         # not leave a stray document behind for the caller to notice and clean up.
         avatar = await self._resolve_icon(icon) if icon else None
+        articles: list[dict] = []
+        if parent_id is not None:
+            articles = await self._search_raw("")
+            await self._refuse_trashed(parent_id, articles)
 
         body: dict = {"name": title, "content": size_new_tables(markdown_to_doc(markdown)) if markdown else {}}
         data = await self._post(f"/ws/{ws}/kb/articles", body)
@@ -472,7 +579,13 @@ class WeeekKB:
         label = await self._write_icon(doc_id, avatar) if avatar is not None else None
 
         if parent_id is not None:
-            await self._set_parent(doc_id, parent_id)
+            # "into" alone would put it first; going after the last child keeps
+            # documents created one after another in that order.
+            siblings = [a for a in articles if str(a.get("parentId")) == str(parent_id)]
+            if siblings:
+                await self._place(doc_id, max(siblings, key=_sort_key)["id"], "down")
+            else:
+                await self._place(doc_id, parent_id)
             # Re-fetch: the create response has no breadcrumbs, and now they've changed.
             fresh = await self._get(f"/ws/{ws}/kb/articles/{doc_id}")
             art = fresh.get("article") or art
@@ -491,10 +604,95 @@ class WeeekKB:
         await self._put(f"/ws/{ws}/kb/articles/{doc_id}", {"name": title})
         self._invalidate_cache()
 
-    async def move_document(self, doc_id: str, parent_id: str | int) -> None:
-        """Nest an existing document under another one (or move it elsewhere)."""
-        await self._set_parent(doc_id, parent_id)
+    async def move_document(
+        self,
+        doc_id: str,
+        *,
+        parent_id: str | int | None = None,
+        before: str | int | None = None,
+        after: str | int | None = None,
+    ) -> dict:
+        """Move a document, with everything under it, into a folder or next to another document.
+
+        ``parent_id`` makes it the first child of that document; ``before``/``after``
+        put it right next to that document, under whatever parent it has (the top
+        level included). Exactly one of the three. Returns the new ``parent_id``.
+        """
+        places = [(p, d) for p, d in ((parent_id, "into"), (before, "up"), (after, "down")) if p is not None]
+        if len(places) != 1:
+            raise KBError("Pass exactly one of parent_id, before, after.")
+        place, direction = places[0]
+        if str(place) == str(doc_id):
+            raise KBError("A document cannot be placed relative to itself.")
+
+        articles = await self._search_raw("")
+        await self._refuse_trashed(place, articles)
+        # Weeek refuses this too; caught here, it costs no request.
+        parents = {str(a["id"]): a.get("parentId") for a in articles}
+        node: str | None = str(place)
+        while node is not None:
+            if node == str(doc_id):
+                raise KBError(f"Document {place} is inside {doc_id}; a document cannot be moved into itself.")
+            parent = parents.get(node)
+            node = None if parent is None else str(parent)
+
+        data, kept = await self._move(doc_id, place, direction, articles)
         self._invalidate_cache()
+
+        moved: dict = next(
+            (a for a in (data.get("data") or {}).get("articles") or [] if str(a.get("id")) == str(doc_id)),
+            {},
+        )
+        new_parent = moved.get("parentId")
+        result: dict = {"parent_id": None if new_parent is None else str(new_parent)}
+        if not kept:
+            result["warning"] = _ORDER_LOST
+        return result
+
+    async def reorder_documents(self, order: list[str]) -> dict:
+        """Line up documents of one folder in the given order, ahead of their other siblings.
+
+        Returns the folder's ``parent_id`` and its children as they are afterwards.
+        """
+        wanted = [str(i) for i in order]
+        if len(set(wanted)) != len(wanted):
+            raise KBError("order lists a document more than once.")
+        articles = await self._search_raw("")
+        by_id = {str(a["id"]): a for a in articles}
+        unknown = [i for i in wanted if i not in by_id]
+        if unknown:
+            raise KBError(f"Not found among the live documents: {', '.join(unknown)}.")
+        parents = {by_id[i].get("parentId") for i in wanted}
+        if len(parents) != 1:
+            raise KBError("order must list documents of one folder; these have different parents.")
+        parent = parents.pop()
+
+        def children(rows: list[dict]) -> list[str]:
+            return [str(a["id"]) for a in sorted((a for a in rows if a.get("parentId") == parent), key=_sort_key)]
+
+        current = children(articles)
+        moved = 0
+        lost: list[str] = []
+        for at, doc in enumerate(wanted):
+            if current[at] == doc:
+                continue
+            place, direction = (current[0], "up") if at == 0 else (wanted[at - 1], "down")
+            _, kept = await self._move(doc, place, direction, articles)
+            current.remove(doc)
+            current.insert(at, doc)
+            moved += 1
+            if not kept:
+                lost.append(doc)
+        self._invalidate_cache()
+
+        result: dict = {
+            "parent_id": None if parent is None else str(parent),
+            "moved": moved,
+            "order": children(await self._search_raw("")) if moved else current,
+        }
+        if lost:
+            result["warning"] = f"{_ORDER_LOST} Affected: {', '.join(lost)}."
+        return result
 
     async def _document_content(self, doc_id: str) -> dict:
         """The raw ProseMirror document behind an article."""
