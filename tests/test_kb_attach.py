@@ -5,6 +5,7 @@ So the risk sits past the upload: the next ``weeek_kb_update`` rebuilds the body
 from Markdown, and a file block that does not come back out of it is gone.
 """
 
+import httpx
 import pytest
 from pycrdt import Doc, XmlFragment
 
@@ -89,6 +90,7 @@ def kb(monkeypatch, tmp_path):
     monkeypatch.setattr(WeeekKB, "_document_content", lambda self, doc_id: _done(served["doc"]))
     monkeypatch.setattr(WeeekKB, "_collab", lambda self, kind, item_id: _done(("wss://collab.test/x", "doc", "token")))
     monkeypatch.setattr(WeeekKB, "_upload", fake_upload)
+    monkeypatch.setattr(WeeekKB, "_allows_direct_s3_upload", lambda self: _done(False))
     return instance, served, uploads
 
 
@@ -163,3 +165,52 @@ async def test_replacing_the_body_keeps_the_attachment(kb, monkeypatch):
 
     assert [c.tag for c in fragment.children] == ["paragraph", "file"]
     assert fragment.children[1].attributes.get("name") == "отчёт.pdf"
+
+
+async def test_a_workspace_with_direct_s3_upload_presigns_posts_to_storage_and_registers(kb, monkeypatch, tmp_path):
+    """The plain multipart upload answers 400 there; the web app takes this route instead."""
+    instance, served, uploads = kb
+    png = tmp_path / "схема.png"
+    png.write_bytes(b"\x89PNG")
+    posts = []
+    storage = []
+
+    async def fake_post(self, path, payload, *, _retry=True):
+        posts.append((path, payload))
+        if path.endswith("/files/presign"):
+            return {"id": "up-1", "url": "https://bucket.test/", "options": {"key": "k/схема.png", "Policy": "p"}}
+        return {"id": "up-1", "name": payload["name"], "size": payload["size"], "previewLink": LINK + "up-1"}
+
+    def handler(request):
+        storage.append(request.content)
+        return httpx.Response(204)
+
+    async def fake_apply(url, name, token, change, settled=None):
+        fragment = Doc().get(collab.FRAGMENT, type=XmlFragment)
+        change(fragment)
+        served["doc"] = {
+            "type": "doc",
+            "content": [{"type": c.tag, "attrs": dict(c.attributes)} for c in fragment.children],
+        }
+
+    monkeypatch.setattr(WeeekKB, "_allows_direct_s3_upload", lambda self: _done(True))
+    monkeypatch.setattr(WeeekKB, "_post", fake_post)
+    monkeypatch.setattr(
+        WeeekKB, "_storage_client", lambda self: httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    monkeypatch.setattr(collab, "apply", fake_apply)
+
+    attached = await instance.attach_files("24", [str(png)])
+
+    assert uploads == []
+    assert posts == [
+        ("/ws/923663/files/presign", {"name": "схема.png", "type": "image/png"}),
+        (
+            "/ws/923663/kb/articles/24/attachments/register",
+            {"id": "up-1", "name": "схема.png", "size": 4, "type": "image/png", "folderId": None},
+        ),
+    ]
+    body = storage[0]
+    assert b'name="key"' in body and b'name="Policy"' in body and b'name="content-type"' in body
+    assert body.index(b'name="content-type"') < body.index(b'name="file"')
+    assert attached == [{"id": "up-1", "name": "схема.png", "size": 4, "link": LINK + "up-1"}]

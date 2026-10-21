@@ -11,6 +11,9 @@ Endpoints (base ``{internal_api_base}/ws/{workspace_id}``):
   POST /kb/articles/{id}/avatar {objectType, objectId}         -> set the document icon
   DELETE /kb/articles/{id}/avatar                              -> clear the icon
   POST /kb/articles/{id}/attachments (multipart "file")        -> upload a file for the body
+  POST /files/presign {name, type}                             -> {id, url, options}: an S3 POST form
+  POST /kb/articles/{id}/attachments/register {id, name, size, type, folderId}
+                                                               -> attach a file uploaded with that form
   GET /tm/tasks/{id}/comments                                  -> task comments
   POST /tm/tasks/{id}/comments {content}                       -> add one
   PUT /tm/tasks/{id}/comments/{commentId} {content}            -> rewrite one
@@ -243,6 +246,7 @@ class WeeekKB:
         self._emoji: dict[str, str] = {}  # codepoint key -> id
         self._labels: dict[str, str] = {}  # avatar id -> emoji character / icon name
         self._catalog_loaded = False
+        self._direct_s3: bool | None = None  # the workspace's allowDirectS3Upload, read once
         self._log = make_logger(config.log_path, "weeek-mcp/kb")
 
     # ------------------------------------------------------------- http/session
@@ -403,6 +407,45 @@ class WeeekKB:
         if resp.status_code >= 400:
             raise KBError(f"Internal API {resp.status_code} for {path}: {_error_text(resp)}")
         return resp.json()
+
+    async def _allows_direct_s3_upload(self) -> bool:
+        """Whether the workspace takes files straight into object storage.
+
+        The web app reads ``allowDirectS3Upload`` from ``GET /ws/{id}`` and, when it is set,
+        never posts the file to Weeek: there the plain multipart upload answers 400
+        "Ошибка во время сохранения файла". An absent flag means the plain upload, as in the web app.
+        """
+        if self._direct_s3 is None:
+            ws = await self._workspace()
+            workspace = (await self._get(f"/ws/{ws}")).get("workspace")
+            if not isinstance(workspace, dict):
+                raise KBError(f"GET /ws/{ws} carried no workspace to read allowDirectS3Upload from.")
+            self._direct_s3 = bool(workspace.get("allowDirectS3Upload"))
+        return self._direct_s3
+
+    def _storage_client(self) -> httpx.AsyncClient:
+        # No Weeek cookies or headers: the presigned policy is the whole credential.
+        return httpx.AsyncClient(timeout=60.0)
+
+    async def _upload_to_storage(self, register_path: str, file: Path) -> dict:
+        """Upload the way the web app does with allowDirectS3Upload: presign, post to storage, register."""
+        ws = await self._workspace()
+        mime = mimetypes.guess_type(file.name)[0] or "application/octet-stream"
+        presigned = await self._post(f"/ws/{ws}/files/presign", {"name": file.name, "type": mime})
+        form = {key: str(value) for key, value in presigned["options"].items()}
+        form["content-type"] = mime
+        try:
+            async with self._storage_client() as storage:
+                with file.open("rb") as fh:
+                    resp = await storage.post(presigned["url"], data=form, files={"file": (file.name, fh, mime)})
+        except httpx.HTTPError as exc:
+            raise KBError(f"Uploading {file.name} to storage failed: {exc}") from exc
+        if resp.status_code >= 400:
+            raise KBError(f"Storage answered {resp.status_code} for {file.name}: {resp.text[:300]}")
+        return await self._post(
+            register_path,
+            {"id": presigned["id"], "name": file.name, "size": file.stat().st_size, "type": mime, "folderId": None},
+        )
 
     async def _put(self, path: str, payload: dict, *, _retry: bool = True):
         client = self._ensure_client()
@@ -835,8 +878,10 @@ class WeeekKB:
         ws = await self._workspace()
         attached: list[dict] = []
         nodes: list[dict] = []
+        direct = await self._allows_direct_s3_upload()
         for file in files:
-            data = await self._upload(f"/ws/{ws}/kb/articles/{doc_id}/attachments", file)
+            path = f"/ws/{ws}/kb/articles/{doc_id}/attachments"
+            data = await (self._upload_to_storage(f"{path}/register", file) if direct else self._upload(path, file))
             link = data.get("previewLink")
             if not data.get("id") or not link:
                 raise KBError(f"Weeek took {file.name} but did not say where it put it: {str(data)[:200]}")
