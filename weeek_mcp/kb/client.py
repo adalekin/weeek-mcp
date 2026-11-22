@@ -446,10 +446,11 @@ class WeeekKB:
             raise KBError(f"Uploading {file.name} to storage failed: {exc}") from exc
         if resp.status_code >= 400:
             raise KBError(f"Storage answered {resp.status_code} for {file.name}: {resp.text[:300]}")
-        return await self._post(
+        registered = await self._post(
             register_path,
             {"id": presigned["id"], "name": file.name, "size": file.stat().st_size, "type": mime, "folderId": None},
         )
+        return cast(dict, registered)
 
     async def _put(self, path: str, payload: dict, *, _retry: bool = True):
         client = self._ensure_client()
