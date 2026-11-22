@@ -97,6 +97,40 @@ def fit_widths(columns: int, available: int = FALLBACK_CONTENT_WIDTH) -> list[in
     return widths
 
 
+def fit_content_widths(natural: list[int], page_width: int) -> tuple[str, list[int]]:
+    """Fit measured cells to the smaller ceiling that can hold them."""
+    if not natural or any(w <= 0 for w in natural):
+        raise TableShapeError("Column measurements are missing or invalid. Nothing was written.")
+    needs = [max(MIN_WIDTH, w) for w in natural]
+    page = min(ceiling("page"), page_width)
+    text = min(ceiling("text"), page)
+    mode = "text" if sum(needs) <= text else "page"
+    available = text if mode == "text" else page
+    if len(needs) * MIN_WIDTH > available:
+        raise TableShapeError("The table is too wide at the minimum column width. Nothing was written.")
+    if sum(needs) <= available:
+        extra, remainder = divmod(available - sum(needs), len(needs))
+        return mode, [w + extra + (i < remainder) for i, w in enumerate(needs)]
+
+    widths = needs.copy()
+    pending = sorted(range(len(needs)), key=needs.__getitem__)
+    # Keep columns that need at most a fair share at their natural width.
+    while pending and needs[pending[0]] * len(pending) <= available:
+        available -= needs[pending.pop(0)]
+    budget = available - MIN_WIDTH * len(pending)
+    demand = sum(needs[i] - MIN_WIDTH for i in pending)
+    used = 0
+    remainders = []
+    for i in pending:
+        extra, remainder = divmod(budget * (needs[i] - MIN_WIDTH), demand)
+        widths[i] = MIN_WIDTH + extra
+        used += extra
+        remainders.append((remainder, i))
+    for _, i in sorted(remainders, key=lambda item: (-item[0], item[1]))[: budget - used]:
+        widths[i] += 1
+    return mode, widths
+
+
 def _column_entry(old: dict | None, width: int | None) -> dict:
     """One entry of the ``columns`` attribute, keeping whatever the old one carried.
 
@@ -199,20 +233,41 @@ def write_columns(doc: dict, resolved: list[list[dict] | None]) -> dict:
     return doc
 
 
+def table_nodes(doc: dict | None) -> list[dict]:
+    """Find the table bodies in a ProseMirror document, in document order."""
+    if doc is None:
+        return []
+    found = [doc] if doc.get("type") == "table_body" else []
+    for child in doc.get("content") or []:
+        if isinstance(child, dict):
+            found.extend(table_nodes(child))
+    return found
+
+
 def read_tables(doc: dict | None) -> list[TableInfo]:
     """Describe every table in a ProseMirror document, in document order."""
-    found: list[TableInfo] = []
+    return [TableInfo(columns=_column_count(node), widths=_parse_columns(node)) for node in table_nodes(doc)]
 
-    def walk(node: dict) -> None:
-        if node.get("type") == "table_body":
-            found.append(TableInfo(columns=_column_count(node), widths=_parse_columns(node)))
-        for child in node.get("content") or []:
-            if isinstance(child, dict):
-                walk(child)
 
-    if isinstance(doc, dict):
-        walk(doc)
-    return found
+def table_text(body: dict) -> list[list[str]]:
+    """Match rendered cells to stored cells before automatic sizing."""
+
+    def text(node: dict) -> str:
+        if node["type"] == "text":
+            return str(node["text"])
+        return "".join(text(child) for child in node.get("content", []))
+
+    rows = []
+    for row in body.get("content", []):
+        if row["type"] != "table_row":
+            continue
+        cells = row.get("content", [])
+        if len(cells) != _column_count(body) or any(
+            int(cell.get("attrs", {}).get(span) or 1) != 1 for cell in cells for span in ("colspan", "rowspan")
+        ):
+            raise TableShapeError("Automatic sizing does not support merged cells. Nothing was written.")
+        rows.append([text(cell) for cell in cells])
+    return rows
 
 
 def carry_over_plan(before: list[TableInfo], after: list[TableInfo]) -> list[dict | None]:

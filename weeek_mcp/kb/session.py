@@ -1,8 +1,7 @@
-"""Weeek's browser channel: login via Playwright.
+"""Weeek's browser channel: login and read-only layout measurements.
 
-The browser runs only to (re)acquire the session cookies the internal KB API
-needs — data itself is fetched with httpx, and bodies are written over the
-collaborative channel (see ``collab.py``). Weeek's login is a two-step flow:
+Data is fetched with httpx, and bodies are written over the collaborative
+channel (see ``collab.py``). Weeek's login is a two-step flow:
 enter email -> Continue -> enter password -> submit. The saved storageState
 (cookies) is then reused by the httpx client.
 """
@@ -12,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from typing import TypedDict, cast
 
 from ..config import Config
 from ..logging_util import make_logger
@@ -26,6 +26,112 @@ CONTINUE_LABELS = ["Continue", "Продолжить", "Далее", "Next"]
 SUBMIT_LABELS = ["Continue", "Log in", "Sign in", "Войти", "Войти в аккаунт", "Продолжить"]
 # URLs that mean we are NOT authenticated yet.
 UNAUTH_MARKERS = ("/login", "/welcome", "/sign-up")
+
+_TABLES_JS = """(expected, measure) => {
+    const editors = Array.from(document.querySelectorAll('.ProseMirror'))
+        .filter(editor => editor.querySelector('table'));
+    if (editors.length !== 1) return null;
+    const editor = editors[0];
+    const tables = Array.from(editor.querySelectorAll('table'));
+    if (tables.length !== expected.length) return null;
+    for (const [i, table] of tables.entries()) {
+        if (expected[i] === null) continue;
+        const rows = Array.from(table.rows, row => Array.from(row.cells, cell => cell.textContent));
+        if (JSON.stringify(rows) !== JSON.stringify(expected[i])) return null;
+        if (Array.from(table.rows).some(row => Array.from(row.cells)
+            .some(cell => cell.colSpan !== 1 || cell.rowSpan !== 1))) return null;
+    }
+    if (!measure) return true;
+    const documentView = editor.closest('.kb-document-view');
+    if (!documentView) return null;
+    const inlinePadding = el => {
+        const style = getComputedStyle(el);
+        return parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+    };
+    // Weeek's wide-table decoration sets the maximum node span to the editor
+    // container width less 96 px. The editor and wrappers consume more of that span.
+    const wideSpan = documentView.getBoundingClientRect().width - 96 - inlinePadding(editor);
+    const probe = editor.cloneNode(false);
+    probe.removeAttribute('id');
+    probe.setAttribute('contenteditable', 'false');
+    probe.setAttribute('aria-hidden', 'true');
+    probe.style.cssText = 'position:fixed;left:-100000px;top:0;visibility:hidden;' +
+        'pointer-events:none;width:max-content;max-width:none;';
+    editor.after(probe);
+    try {
+        return tables.map((table, i) => {
+            if (expected[i] === null) return null;
+            const node = table.closest('.table-node');
+            const scroller = table.closest('.table__content');
+            if (!node || !scroller) return null;
+            const page = Math.floor(wideSpan - inlinePadding(node) - inlinePadding(scroller));
+            const copy = table.cloneNode(true);
+            for (const group of copy.querySelectorAll('colgroup')) group.remove();
+            for (const el of [copy, ...copy.querySelectorAll('th, td, th *, td *')]) {
+                el.style.setProperty('white-space', 'nowrap', 'important');
+                el.style.setProperty('max-width', 'none', 'important');
+                el.style.setProperty('min-width', '0', 'important');
+                el.style.setProperty('width', 'auto', 'important');
+            }
+            copy.style.setProperty('width', 'max-content', 'important');
+            copy.style.setProperty('table-layout', 'auto', 'important');
+            probe.append(copy);
+            const widths = Array.from(copy.rows[0].cells, cell => Math.ceil(cell.getBoundingClientRect().width));
+            copy.remove();
+            return {natural: widths, page};
+        });
+    } finally {
+        probe.remove();
+    }
+}"""
+
+
+class TableMeasurement(TypedDict):
+    natural: list[int]
+    page: int
+
+
+async def measure_table_columns(
+    cfg: Config, workspace_id: str, doc_id: str, expected: list[list[list[str]] | None]
+) -> list[TableMeasurement | None]:
+    """Measure natural widths against the expected cells in the rendered article."""
+    try:
+        from playwright.async_api import Error, async_playwright
+    except ModuleNotFoundError as exc:
+        raise KBAuthError("Automatic sizing requires Playwright and its Chromium browser.") from exc
+
+    if not cfg.storage_state_path.exists():
+        raise KBAuthError("No saved session. Run `weeek-mcp-login` first.")
+    try:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=cfg.headless, timeout=10000)
+            try:
+                context = await browser.new_context(storage_state=str(cfg.storage_state_path))
+                page = await context.new_page()
+                await page.goto(
+                    f"{cfg.app_base}/ws/{workspace_id}/kb/{doc_id}", wait_until="domcontentloaded", timeout=15000
+                )
+                if any(marker in page.url for marker in UNAUTH_MARKERS):
+                    raise KBAuthError("Session expired. Run `weeek-mcp-login` to refresh.")
+                await page.wait_for_function(
+                    "expected => (" + _TABLES_JS + ")(expected, false)", arg=expected, timeout=25000
+                )
+                result = await asyncio.wait_for(
+                    page.evaluate(
+                        "async expected => { await document.fonts.ready; return ("
+                        + _TABLES_JS
+                        + ")(expected, true); }",
+                        expected,
+                    ),
+                    timeout=5,
+                )
+            finally:
+                await browser.close()
+    except (Error, TimeoutError) as exc:
+        raise KBAuthError("Could not measure the rendered tables. Check the browser and reload the article.") from exc
+    if not isinstance(result, list):
+        raise KBAuthError("The rendered tables changed during measurement.")
+    return cast(list[TableMeasurement | None], result)
 
 
 class KBAuthError(RuntimeError):

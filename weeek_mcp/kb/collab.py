@@ -234,6 +234,29 @@ def measure_body(body: XmlElement) -> tuple[int, str | None]:
     return columns, raw if isinstance(raw, str) else None
 
 
+def table_text(body: XmlElement) -> list[list[str]]:
+    """Read visible cell text from a live table, without its formatting marks."""
+
+    def text(node: XmlElement | XmlText | XmlFragment) -> str:
+        if isinstance(node, XmlText):
+            return "".join(value for value, _ in node.diff() if isinstance(value, str))
+        return "".join(text(child) for child in node.children)
+
+    rows = []
+    for row in body.children:
+        if not isinstance(row, XmlElement) or row.tag != "table_row":
+            continue
+        cells = []
+        for cell in row.children:
+            if not isinstance(cell, XmlElement) or cell.tag != "table_cell":
+                continue
+            if any(float(cell.attributes.get(span) or 1) != 1 for span in ("colspan", "rowspan")):
+                raise CollabError("The table now contains merged cells. Nothing was written.")
+            cells.append(text(cell))
+        rows.append(cells)
+    return rows
+
+
 @asynccontextmanager
 async def open_document(url: str, name: str, token: str):
     """Connect, authenticate, and sync — yields the shared Y.Doc, live.

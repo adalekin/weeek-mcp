@@ -976,9 +976,9 @@ KB_TOOLS: list[types.Tool] = [
             "Resize the columns of a table in a knowledge base document. Weeek stores "
             "column widths in pixels (minimum 90) and nothing else — there is no row "
             "height or table width to set. Pass widths for exact sizes, or fit=true to "
-            "spread the table across the width chosen by the width argument: the column "
-            "of text (676px, default) or the whole document area (1040px), which a table "
-            "may overhang. Tables are addressed by their order in the document, starting "
+            "fit the table across the text column (676px, default) or the document area "
+            "(1040px). Use width=auto to measure cells, choose the smaller suitable area "
+            "and give wider cells more room. Tables are addressed by their order in the document, starting "
             "at 0; omitting table_index with fit=true resizes every table. Written over "
             "Weeek's collaborative channel, leaving the document's content untouched."
         ),
@@ -1004,16 +1004,15 @@ KB_TOOLS: list[types.Tool] = [
                 },
                 "fit": {
                     "type": "boolean",
-                    "description": "Spread the columns evenly across the chosen width instead of giving widths.",
+                    "description": "Fit the table instead of giving column widths.",
                 },
                 "width": {
                     "type": "string",
-                    "enum": ["text", "page"],
+                    "enum": ["text", "page", "auto"],
                     "description": (
-                        'Which ceiling a fitted table is spread across: "text" (676px, inside '
-                        'the column of text, the default) or "page" (1040px, overhanging it '
-                        'across the document area). Pick "page" for a table whose cells hold '
-                        "sentences rather than words — it is what wide roadmap-style tables use."
+                        'With fit=true, "text" (676px, default) and "page" (1040px) divide the '
+                        'width evenly. "auto" measures unmerged cells in the rendered document '
+                        "and chooses a width for each column and a ceiling for each table."
                     ),
                 },
             },

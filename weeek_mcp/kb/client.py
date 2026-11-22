@@ -2,8 +2,8 @@
 
 Weeek has no public KB API, but the web app talks to a stable internal API at
 ``api.weeek.net`` authenticated by session cookies. We fetch KB data with httpx
-using cookies from a saved Playwright login (see ``session.py``); the browser is
-only launched to (re)acquire cookies when they are missing or expired.
+using cookies from a saved Playwright login (see ``session.py``). The browser
+also measures rendered cells for content-aware table sizing.
 
 Endpoints (base ``{internal_api_base}/ws/{workspace_id}``):
   GET /kb/articles/search?search=&offset=0&limit=&isTrashed=0  -> flat article list
@@ -65,14 +65,18 @@ from ..config import Config
 from ..logging_util import make_logger
 from . import collab
 from .prosemirror import markdown_to_doc, restore_files, to_markdown
-from .session import KBAuthError, automated_login, load_cookies_into
+from .session import KBAuthError, automated_login, load_cookies_into, measure_table_columns
 from .tables import (
     MeasuredTable,
+    TableShapeError,
     carry_over_plan,
     ceiling,
+    fit_content_widths,
     read_tables,
     resolve_columns,
     size_new_tables,
+    table_nodes,
+    table_text,
     widths_plan,
     write_columns,
 )
@@ -922,16 +926,52 @@ class WeeekKB:
         with what was asked for: a dropped sync has to surface as an error rather
         than as a success with nothing changed.
         """
-        tables = read_tables(await self._document_content(doc_id))
+        old = await self._document_content(doc_id)
+        tables = read_tables(old)
         plan = widths_plan(tables, table_index, widths, fit=fit)
         expected: list[list[int] | None] = []
+        grids: list[list[list[str]] | None] | None = None
+        if width == "auto":
+            if not fit:
+                raise ValueError('width="auto" requires fit=true.')
+            fitted_to: dict = {"width": "auto", "tables": [None] * len(plan)}
+            nodes = table_nodes(old)
+            try:
+                grids = [table_text(node) if spec is not None else None for node, spec in zip(nodes, plan, strict=True)]
+                natural = await measure_table_columns(self._cfg, await self._workspace(), str(doc_id), grids)
+                if len(natural) != len(plan) or any(
+                    values is None or len(values["natural"]) != tables[i].columns
+                    for i, values in enumerate(natural)
+                    if plan[i] is not None
+                ):
+                    raise TableShapeError("The table measurements do not match the document. Nothing was written.")
+                current_nodes = table_nodes(await self._document_content(doc_id))
+                # Opening the editor can add default node attributes without changing any cells.
+                if len(current_nodes) != len(nodes) or to_markdown(current_nodes) != to_markdown(nodes):
+                    raise TableShapeError("The tables changed during measurement. Nothing was written.")
+                for i, values in enumerate(natural):
+                    if plan[i] is not None and values is not None:
+                        mode, column_widths = fit_content_widths(values["natural"], values["page"])
+                        plan[i] = {"mode": "widths", "widths": column_widths}
+                        fitted_to["tables"][i] = {"width": mode, "pixels": sum(column_widths)}
+            except (KBAuthError, TableShapeError) as exc:
+                raise KBError(str(exc)) from exc
+            available = ceiling("page")
+        else:
+            available = ceiling(width)
+            fitted_to = {"width": width, "pixels": available}
 
         def size(fragment) -> None:
-            bodies = [collab.measure_body(body) for body in collab.table_bodies(fragment)]
-            measured = [MeasuredTable(columns=columns, raw_columns=raw) for columns, raw in bodies]
-            resolved = resolve_columns(measured, plan, ceiling(width))
+            bodies = collab.table_bodies(fragment)
+            if grids is not None and (
+                len(bodies) != len(grids)
+                or any(grid is not None and collab.table_text(body) != grid for body, grid in zip(bodies, grids))
+            ):
+                raise TableShapeError("The tables changed during measurement. Nothing was written.")
+            measured = [MeasuredTable(*collab.measure_body(body)) for body in bodies]
+            resolved = resolve_columns(measured, plan, available)
             expected.extend([[e["width"] for e in entries] if entries else None for entries in resolved])
-            for body, entries in zip(collab.table_bodies(fragment), resolved, strict=True):
+            for body, entries in zip(bodies, resolved, strict=True):
                 if entries is not None:
                     body.attributes["columns"] = json.dumps(entries)
 
@@ -942,7 +982,7 @@ class WeeekKB:
         url, name, token = await self._collab("article", str(doc_id))
         try:
             await collab.apply(url, name, token, size, settled=settled)
-        except collab.CollabError as exc:
+        except (collab.CollabError, TableShapeError) as exc:
             raise KBError(str(exc)) from exc
 
         stored = [t.widths for t in read_tables(await self._document_content(doc_id))]
@@ -955,7 +995,7 @@ class WeeekKB:
         return {
             "tables": len(expected),
             "changed": sum(1 for want in expected if want is not None),
-            "fitted_to": {"width": width, "pixels": ceiling(width)},
+            "fitted_to": fitted_to,
             "widths": stored,
         }
 

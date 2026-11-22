@@ -14,6 +14,7 @@ import pytest
 from weeek_mcp.kb import collab
 from weeek_mcp.kb.client import KBError, WeeekKB
 from weeek_mcp.kb.prosemirror import markdown_to_doc
+from weeek_mcp.kb.tables import table_nodes
 
 OLD = "# Карта\n\nстарый текст\n"
 NEW = "# Карта\n\nновый текст\n"
@@ -163,6 +164,52 @@ async def test_widths_that_never_arrive_are_still_reported(sized, monkeypatch):
 
     with pytest.raises(KBError, match="Weeek now reports"):
         await instance.set_table_widths("24", table_index=0, widths=[104, 572])
+
+
+async def test_auto_fit_reads_back_content_aware_widths_without_replacing_the_table(sized, monkeypatch):
+    instance, served = sized
+    fragment = _fragment_with_table([338, 338])
+
+    async def measure(cfg, workspace, doc_id, grids):
+        assert grids == [[["a", "b"], ["1", "2"]]]
+        normalized = _with_widths(TABLE, [338, 338])
+        table_nodes(normalized)[0]["content"][0]["attrs"] = {"meta": {}}
+        served["doc"] = normalized
+        return [{"natural": [90, 1100], "page": 1040}]
+
+    async def apply(url, name, token, change, settled=None):
+        change(fragment)
+        assert collab.table_text(collab.table_bodies(fragment)[0]) == [["a", "b"], ["1", "2"]]
+        assert collab.measure_body(collab.table_bodies(fragment)[0])[1] == json.dumps(
+            [{"id": str(i), "width": w, "color": "", "backgroundColor": ""} for i, w in enumerate([90, 950])]
+        )
+        served["doc"] = _with_widths(TABLE, [90, 950])
+        assert await settled()
+
+    monkeypatch.setattr("weeek_mcp.kb.client.measure_table_columns", measure)
+    monkeypatch.setattr(collab, "apply", apply)
+    result = await instance.set_table_widths("24", fit=True, width="auto")
+
+    assert result["widths"] == [[90, 950]]
+    assert result["fitted_to"] == {"width": "auto", "tables": [{"width": "page", "pixels": 1040}]}
+
+
+async def test_auto_fit_refuses_a_live_table_with_changed_text(sized, monkeypatch):
+    instance, _served = sized
+    fragment = _fragment_with_table([338, 338])
+    collab.write_body(fragment, _with_widths(TABLE.replace("| 1 |", "| 3 |"), [338, 338]))
+    before = str(fragment)
+
+    async def apply(url, name, token, change, settled=None):
+        change(fragment)
+
+    monkeypatch.setattr(
+        "weeek_mcp.kb.client.measure_table_columns", lambda *args: _done([{"natural": [90, 500], "page": 919}])
+    )
+    monkeypatch.setattr(collab, "apply", apply)
+    with pytest.raises(KBError, match="changed during measurement"):
+        await instance.set_table_widths("24", fit=True, width="auto")
+    assert str(fragment) == before
 
 
 def _fragment_with_table(widths):

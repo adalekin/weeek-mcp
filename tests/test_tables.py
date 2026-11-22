@@ -11,6 +11,7 @@ from weeek_mcp.kb.tables import (
     TableShapeError,
     carry_over_plan,
     ceiling,
+    fit_content_widths,
     fit_widths,
     read_tables,
     resolve_columns,
@@ -88,6 +89,26 @@ def test_the_wide_ceiling_reaches_resolve_columns():
     """The choice has to survive the planning step, not just the constant."""
     resolved = resolve_columns([MeasuredTable(columns=4, raw_columns=None)], [{"mode": "fit"}], ceiling("page"))
     assert sum(entry["width"] for entry in resolved[0]) == 1040
+
+
+@pytest.mark.parametrize(
+    ("natural", "page", "mode", "expected"),
+    [
+        ([90, 90, 496], 919, "text", [90, 90, 496]),
+        ([90, 90, 497], 1040, "page", [211, 211, 618]),
+        ([70, 600, 1100, 100], 1040, "page", [90, 315, 535, 100]),
+        ([90, 1100], 919, "page", [90, 829]),
+        ([90, 500], 640, "text", [115, 525]),
+        ([90, 1100], 1200, "page", [90, 950]),
+    ],
+)
+def test_content_fit_chooses_the_ceiling_and_preserves_relative_needs(natural, page, mode, expected):
+    assert fit_content_widths(natural, page) == (mode, expected)
+
+
+def test_content_fit_refuses_a_table_that_cannot_fit_at_minimum_width():
+    with pytest.raises(TableShapeError, match="too wide at the minimum"):
+        fit_content_widths([90] * 12, 919)
 
 
 def test_fit_widths_respect_the_minimum_when_columns_do_not_fit():
